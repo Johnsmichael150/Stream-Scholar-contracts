@@ -33,6 +33,7 @@ pub enum DataKey {
     VetoedCourse(Address, u64),
     IsTeacher(Address),
     Scholarship(Address), // student -> Scholarship struct
+    VetoedCourseGlobal(u64),
 }
 
 #[contracttype]
@@ -155,6 +156,12 @@ impl ScholarContract {
     }
 
     pub fn has_access(env: Env, student: Address, course_id: u64) -> bool {
+        // Check if course is globally vetoed
+        let is_globally_vetoed: bool = env.storage().instance().get(&DataKey::VetoedCourseGlobal(course_id)).unwrap_or(false);
+        if is_globally_vetoed {
+            return false;
+        }
+
         // Check if course is vetoed for this student
         let is_vetoed: bool = env.storage().instance().get(&DataKey::VetoedCourse(student.clone(), course_id)).unwrap_or(false);
         if is_vetoed {
@@ -274,6 +281,18 @@ impl ScholarContract {
         // Transfer to teacher
         let client = token::Client::new(&env, &scholarship.token);
         client.transfer(&env.current_contract_address(), &teacher, &amount);
+    }
+
+    pub fn veto_course_globally(env: Env, admin: Address, course_id: u64, status: bool) {
+        admin.require_auth();
+        
+        // Verify caller is admin
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Admin not set");
+        if stored_admin != admin {
+            env.panic_with_error((soroban_sdk::xdr::ScErrorType::Contract, soroban_sdk::xdr::ScErrorCode::InvalidAction));
+        }
+        
+        env.storage().instance().set(&DataKey::VetoedCourseGlobal(course_id), &status);
     }
 
     pub fn veto_course_access(env: Env, admin: Address, student: Address, course_id: u64) {

@@ -228,3 +228,45 @@ fn test_scholarship_role() {
     );
     assert!(result.is_err());
 }
+
+#[test]
+fn test_global_course_veto() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let student_a = Address::generate(&env);
+    let student_b = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
+    token_client.mint(&student_a, &1000);
+    token_client.mint(&student_b, &1000);
+
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+    
+    client.init(&10, &3600, &10, &100, &60);
+    client.set_admin(&admin);
+
+    // 1. Give both students access to course 1
+    client.buy_access(&student_a, &1, &200, &token_address.address());
+    let course_ids = vec![&env, 1];
+    client.buy_subscription(&student_b, &course_ids, &1, &300, &token_address.address());
+
+    assert!(client.has_access(&student_a, &1));
+    assert!(client.has_access(&student_b, &1));
+
+    // 2. Admin vetoes course 1 GLOBALLY
+    client.veto_course_globally(&admin, &1, &true);
+
+    // 3. Both should lose access
+    assert!(!client.has_access(&student_a, &1));
+    assert!(!client.has_access(&student_b, &1));
+
+    // 4. Verification that other courses are not affected
+    let course_ids_2 = vec![&env, 2];
+    client.buy_subscription(&student_b, &course_ids_2, &1, &300, &token_address.address());
+    assert!(client.has_access(&student_b, &2));
+}
