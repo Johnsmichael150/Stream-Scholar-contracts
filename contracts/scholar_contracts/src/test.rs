@@ -334,6 +334,51 @@ fn test_refund_resets_last_purchase_time() {
 }
 
 #[test]
+fn test_decimals_and_leak_prevention() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let student = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    // Deploy a token simulating high precision decimals
+    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
+    
+    // Give student 100 units (100 * 10^7 stroops)
+    let initial_balance: i128 = 1_000_000_000;
+    token_client.mint(&student, &initial_balance);
+
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+    
+    // Set base rate to 1 unit per second (10_000_000 stroops)
+    let rate: i128 = 10_000_000;
+    client.init(&rate, &3600, &10, &100, &60);
+
+    // Attempt to buy with an inexact amount (e.g. 2.5 units = 25_000_000 stroops)
+    // Since rate is 10_000_000, 25_000_000 / 10_000_000 = 2 seconds
+    // The actual cost should be 20_000_000. The remaining 5_000_000 should NOT be leaked.
+    let amount_to_try: i128 = 25_000_000;
+    client.buy_access(&student, &1, &amount_to_try, &token_address.address());
+
+    // Verify balance was only deducted by the exact multiple of rate
+    let actual_cost: i128 = 20_000_000;
+    let expected_balance = initial_balance - actual_cost;
+    assert_eq!(token::Client::new(&env, &token_address.address()).balance(&student), expected_balance);
+    
+    // Verify full refund leaves no value leaked
+    env.ledger().set_timestamp(0); // exactly at purchase time
+    let refund_amount = client.pro_rated_refund(&student, &1);
+    
+    // Should refund the exact time left (2 seconds total -> 20_000_000)
+    assert_eq!(refund_amount, 20_000_000);
+    
+    // Final balance should be perfectly restored
+    assert_eq!(token::Client::new(&env, &token_address.address()).balance(&student), initial_balance);
+}
+
+#[test]
 fn test_admin_veto() {
     let env = Env::default();
     env.mock_all_auths();
