@@ -897,3 +897,43 @@ fn test_course_registry_gas_efficiency() {
     let all_courses = client.list_courses();
     assert_eq!(all_courses.len(), 50);
 }
+
+#[test]
+fn test_double_spend_prevention() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let student = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
+    
+    // Give student exactly 150 tokens
+    token_client.mint(&student, &150);
+
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+    
+    client.init(&10, &3600, &10, &100, &60); // Base rate = 10 tokens / sec
+
+    // 1. First purchase succeeds (costs 100 tokens)
+    client.buy_access(&student, &1, &100, &token_address.address());
+    assert_eq!(token::Client::new(&env, &token_address.address()).balance(&student), 50);
+    assert!(client.has_access(&student, &1));
+
+    // 2. Second purchase (aiming to spend 100 tokens again) MUST fail
+    // We use try_invoke_contract to verify that it traps correctly
+    let result = env.try_invoke_contract::<(), soroban_sdk::Error>(
+        &contract_id,
+        &Symbol::new(&env, "buy_access"),
+        (student.clone(), 2_u64, 100_i128, token_address.address()).into_val(&env)
+    );
+    
+    // Should fail with HostError (likely Insufficient Funds in the token contract)
+    assert!(result.is_err());
+    
+    // Verify that student still has 50 tokens and NO access to course 2
+    assert_eq!(token::Client::new(&env, &token_address.address()).balance(&student), 50);
+    assert!(!client.has_access(&student, &2));
+}
