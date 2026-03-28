@@ -1,42 +1,27 @@
-# Soroban Project
+# Stream-Scholar Contracts
 
-## Project Structure
+A comprehensive educational platform built on Stellar/Soroban blockchain featuring course streaming, scholarship management, and dynamic Student Profile NFTs.
 
-This repository uses the recommended structure for a Soroban project:
+## Overview
 
-```text
-.
-├── contracts
-│   └── hello_world
-│       ├── src
-│       │   ├── lib.rs
-│       │   └── test.rs
-│       └── Cargo.toml
-├── Cargo.toml
-└── README.md
-```
+Stream-Scholar is a decentralized learning platform that combines traditional educational features with modern blockchain technology. The platform includes:
 
-- New Soroban contracts can be put in `contracts`, each in their own directory. There is already a `hello_world` contract in there to get you started.
-- If you initialized this project with any other example contracts via `--with-example`, those contracts will be in the `contracts` directory as well.
-- Contracts should have their own `Cargo.toml` files that rely on the top-level `Cargo.toml` workspace for their dependencies.
-- Frontend libraries can be added to the top-level directory as well. If you initialized this project with a frontend template via `--frontend-template` you will have those files already included.
+- **Course Streaming**: Pay-per-minute educational content streaming
+- **Scholarship System**: On-chain scholarship funding and management
+- **Student Profile NFTs**: Dynamic NFTs that grow with student achievements
+- **Governance**: Admin and global course veto mechanisms
+- **Gas Optimization**: Smart gas estimation and subsidy features
 
-## Deployed Contract
-- **Network:** Stellar Testnet
-- **Contract ID:** CB7OZPTIUENDWJWNHRGDPZLIEIS6TXMFRYT4WCGHIZVYLCTXEONC6VHY
+## Quick Start
 
+### Prerequisites
 
-## Session Security
+- Rust 1.70+ (for Soroban contracts)
+- Node.js 16+ (for frontend and NFT features)
+- Docker and Docker Compose (for local testing)
+- Stellar account (testnet for development)
 
-This contract prevents multi-device streaming by enforcing a strict single-session lock per user account. 
-
-It natively extends the existing `heartbeat` function to validate a unique 32-byte `session_hash` (passed via the previously unused `_signature` parameter), ensuring complete backward compatibility with zero breaking changes to the API.
-
-**How it works:**
-* **Accepted Session:** When a heartbeat is received, it checks the stored session hash. If the hash matches the active session, or if the previous session has safely timed out (exceeding the `heartbeat_interval`), the stream is securely permitted.
-* **Rejected Session:** If the incoming hash does not match the stored hash *and* the previous session is currently active, the contract explicitly rejects the heartbeat. This immediately halts unauthorized parallel streams or duplicate logins.
-
-## Local Test Network
+### Local Test Network Setup
 
 To set up a local test network with Docker that pre-loads 5 dummy courses and 100 test USDC:
 
@@ -77,129 +62,214 @@ To verify the setup is successful:
    ```
    Expected output: `1000000000` (100 USDC with 7 decimals)
 
-4. Verify course info for course 1:
-   ```bash
-   soroban contract invoke --id <SCHOLAR_CONTRACT_ID> --network standalone -- get_course_info --course_id 1
-   ```
-   Should return course info with is_active: true
+## Student Profile NFT Feature
 
-5. Test buying access (this should succeed if setup is correct):
-   ```bash
-   soroban contract invoke --id <SCHOLAR_CONTRACT_ID> --source <STUDENT_SECRET> --network standalone -- buy_access --student <STUDENT_ADDRESS> --course_id 1 --amount 100 --token <USDC_TOKEN_ID>
-   ```
+### Overview
 
-If all tests pass, the local test network setup is successful.
-
-## GPA-Weighted Flow Rate Bonus Logic
-
-This feature implements a "Meritocratic Drip" system that incentivizes academic excellence by adjusting token flow rates based on student GPA.
-
-### How It Works
-
-**GPA Bonus Calculation:**
-- **Threshold:** 3.5 GPA (stored as 35 to avoid floating-point arithmetic)
-- **Bonus Rate:** 2% increase for every 0.1 GPA point above 3.5
-- **Maximum GPA:** 4.4 (18% maximum bonus)
-- **Oracle Verification:** Only oracle-verified GPAs are considered
-
-**Example Calculations:**
-- 3.5 GPA = 0% bonus (base rate)
-- 3.6 GPA = 2% bonus
-- 3.7 GPA = 4% bonus
-- 4.0 GPA = 10% bonus
-- 4.4 GPA = 18% bonus
+The Student Profile NFT system transforms a student's learning journey into a unique, tradable non-fungible token on the Stellar blockchain. Each NFT represents a student's profile that dynamically evolves based on their educational achievements.
 
 ### Key Features
 
-**1. Dynamic Rate Adjustment**
-The `calculate_dynamic_rate` function now includes GPA bonuses alongside existing watch time discounts:
-```rust
-// Apply GPA bonus (increase rate based on academic performance)
-let gpa_bonus_percentage = Self::calculate_gpa_bonus(env.clone(), student.clone());
-if gpa_bonus_percentage > 0 {
-    let bonus = (rate * gpa_bonus_percentage as i128) / 100;
-    rate += bonus; // Increase rate for high-performing students
-}
-```
+- **Dynamic Leveling**: NFTs automatically level up (1-8) based on accumulated XP
+- **Achievement System**: Unlock badges and achievements that add visual flair to your NFT
+- **Course Tracking**: Link completed courses to earn XP and level up
+- **Study Streaks**: Maintain daily study habits for bonus rewards
+- **Visual Progression**: NFT artwork changes based on level and achievements
+- **Stellar Native**: Built on Stellar for low fees and fast transactions
+- **Transferable**: Own, trade, or gift your learning profile NFT
 
-**2. Oracle-Based GPA Reporting**
-Only the designated academic oracle can report student GPAs:
-```rust
-pub fn report_student_gpa(env: Env, oracle: Address, student: Address, gpa: u64)
-```
+### NFT Installation
 
-**3. On-the-Fly Drip Recalculation**
-When GPA updates occur, the system automatically recalculates flow rates without resetting stream start dates:
-```rust
-pub fn recalculate_drip_rate_on_gpa_change(env: Env, student: Address)
-```
-
-### Implementation Details
-
-**Data Structures:**
-```rust
-pub struct StudentGPA {
-    pub student: Address,
-    pub gpa: u64, // Stored as integer (e.g., 3.7 = 37)
-    pub last_updated: u64,
-    pub oracle_verified: bool,
-}
-```
-
-**Constants:**
-```rust
-const GPA_BONUS_THRESHOLD: u64 = 35; // 3.5 GPA threshold
-const GPA_BONUS_PERCENTAGE_PER_POINT: u64 = 20; // 2% per 0.1 GPA (20% per 1.0 GPA)
-```
-
-### Usage Example
-
-1. **Set up Academic Oracle:**
 ```bash
-soroban contract invoke --id <CONTRACT_ID> --source <ADMIN> --network standalone -- set_academic_oracle --admin <ADMIN> --oracle <ORACLE_ADDRESS>
+# Install NFT dependencies
+npm install
+
+# Environment Setup
+cp .env.example .env
+# Edit .env with your Stellar credentials
+
+# Deploy NFT contract
+npm run deploy
+
+# Mint a student profile NFT
+npm run mint student123 "Alice Johnson" alice@example.com
+
+# Run frontend
+npm run dev
 ```
 
-2. **Report Student GPA:**
+### Level System
+
+| Level | Name | Required XP | Visual Theme |
+|-------|------|-------------|--------------|
+| 1 | Beginner | 0 | Gray 🌱 |
+| 2 | Novice | 100 | Silver 📖 |
+| 3 | Apprentice | 250 | Bronze ⚒️ |
+| 4 | Scholar | 500 | Gold 🎓 |
+| 5 | Expert | 1,000 | Emerald 💎 |
+| 6 | Master | 2,000 | Blue 👑 |
+| 7 | Grandmaster | 5,000 | Purple 🔮 |
+| 8 | Legend | 10,000 | Orange 🏆 |
+
+## Project Structure
+
+```text
+.
+├── contracts/
+│   ├── scholar_contracts/     # Main Soroban contracts
+│   └── token/                 # USDC token contract
+├── src/                       # NFT Student Profile system
+├── frontend/                  # NFT web interface
+├── scripts/                   # Deployment and management scripts
+├── docs/                      # Documentation
+├── tests/                     # Test files
+└── docker-compose.yml         # Local network setup
+```
+
+## Core Features
+
+### Course Streaming
+- Pay-per-minute streaming model
+- Session management and validation
+- Dynamic pricing based on demand
+- Teacher revenue sharing
+
+### Scholarship System
+- On-chain scholarship funding
+- Teacher-restricted withdrawals
+- Scholarship role management
+- Transparent fund allocation
+
+### Governance
+- Admin course veto and revocation
+- Global course veto mechanism
+- Platform governance features
+- Community-driven decisions
+
+### Gas Optimization
+- Gas estimation service
+- Subsidy mechanisms for students
+- Optimized contract interactions
+- Cost-effective streaming
+
+## Development
+
+### Building Contracts
+
 ```bash
-soroban contract invoke --id <CONTRACT_ID> --source <ORACLE> --network standalone -- report_student_gpa --oracle <ORACLE> --student <STUDENT_ADDRESS> --gpa 38
+# Build Soroban contracts
+cd contracts/scholar_contracts
+cargo build --target wasm32-unknown-unknown --release
+
+# Run tests
+cargo test
 ```
 
-3. **Check GPA Bonus:**
+### Frontend Development
+
 ```bash
-soroban contract invoke --id <CONTRACT_ID> --network standalone -- get_student_gpa_bonus --student <STUDENT_ADDRESS>
+# Install dependencies
+npm install
+
+# Start development server
+npm run dev
+
+# Build for production
+npm run build
 ```
-
-4. **Get Student GPA Data:**
-```bash
-soroban contract invoke --id <CONTRACT_ID> --network standalone -- get_student_gpa --student <STUDENT_ADDRESS>
-```
-
-### Events
-
-The system emits events for GPA updates and drip recalculations:
-- `GPA_Updated`: Emitted when a student's GPA is updated
-- `Drip_Rate_Recalculated`: Emitted when flow rates are recalculated due to GPA changes
-
-### Security Considerations
-
-1. **Oracle Authorization:** Only the designated academic oracle can report GPAs
-2. **GPA Validation:** GPAs are validated to be within 0.0-4.4 range
-3. **Verification Flag:** Only oracle-verified GPAs affect bonus calculations
-4. **Backward Compatibility:** Existing functionality remains unchanged
 
 ### Testing
 
-Comprehensive tests are included in `test.rs`:
-- `test_gpa_bonus_calculation`: Verifies bonus percentage calculations
-- `test_gpa_weighted_flow_rate`: Tests integration with access purchases
-- `test_gpa_data_storage`: Validates GPA data storage and retrieval
-- `test_drip_recalculation_on_gpa_change`: Tests automatic recalculation
-- `test_gpa_validation`: Ensures GPA validation works correctly
+```bash
+# Run contract tests
+cargo test
 
-### Benefits
+# Run NFT tests
+npm test
 
-1. **Academic Incentive:** Students are financially motivated to maintain high GPAs
-2. **Meritocratic System:** Higher-performing students receive better rates
-3. **Dynamic Adjustment:** Rates update automatically as academic performance changes
-4. **Preserved Contracts:** Stream start dates and balances remain intact during recalculation
-5. **Gamification:** Creates a competitive environment for academic excellence
+# Run integration tests
+npm run test:integration
+```
+
+## Documentation
+
+- [Instructor Onboarding Guide](docs/INSTRUCTOR_ONBOARDING_GUIDE.md)
+- [WASM Size Benchmarking](docs/WASM_SIZE_BENCHMARKING.md)
+- [Course Metadata Implementation](docs/course-metadata-implementation-guide.md)
+- [Contribution Guidelines](CONTRIBUTING.md)
+
+## Security Features
+
+### Session Management
+The platform implements advanced session management to prevent unauthorized access:
+
+It natively extends the existing `heartbeat` function to validate a unique 32-byte `session_hash` (passed via the previously unused `_signature` parameter), ensuring complete backward compatibility with zero breaking changes to the API.
+
+**How it works:**
+* **Accepted Session:** When a heartbeat is received, it checks the stored session hash. If the hash matches the active session, or if the previous session has safely timed out (exceeding the `heartbeat_interval`), the stream is securely permitted.
+* **Rejected Session:** If the incoming hash does not match the stored hash *and* the previous session is currently active, the contract explicitly rejects the heartbeat. This immediately halts unauthorized parallel streams or duplicate logins.
+
+### Access Control
+- Role-based permissions
+- Teacher authentication
+- Student withdrawal protections
+- Admin governance controls
+
+## Network Deployment
+
+### Testnet Deployment
+
+```bash
+# Deploy to testnet
+./scripts/deploy.sh testnet
+
+# Verify deployment
+soroban contract info --id <CONTRACT_ID> --network testnet
+```
+
+### Mainnet Deployment
+
+```bash
+# Deploy to mainnet
+./scripts/deploy.sh mainnet
+
+# Note: Ensure sufficient gas fees and proper configuration
+```
+
+## Analytics & Monitoring
+
+- WASM size benchmarking
+- Gas usage optimization
+- Performance metrics
+- User engagement tracking
+
+## Contributing
+
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+
+## Roadmap
+
+### Phase 1 - Core Features 
+- [x] Course streaming platform
+- [x] Scholarship system
+- [x] Governance mechanisms
+- [x] Gas optimization
+- [x] Student Profile NFTs
+
+### Phase 2 - Enhanced Features (In Progress)
+- [ ] Social features (following, leaderboards)
+- [ ] Course marketplace integration
+- [ ] Advanced analytics dashboard
+- [ ] Mobile app development
+
+### Phase 3 - Ecosystem (Future)
+- [ ] DAO governance for achievement standards
+- [ ] Cross-chain compatibility
+- [ ] Institutional partnerships
+- [ ] Scholarship programs
+
+---
+
+**Built with ❤️ by the Stream-Scholar Team**
+
+*Transforming education into verifiable digital achievements on the Stellar blockchain.*
