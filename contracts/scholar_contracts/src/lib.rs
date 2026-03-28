@@ -87,6 +87,24 @@ pub enum DataKey {
     DeansCouncil,
     BoardPauseRequest(Address), // student -> BoardPauseRequest struct
     BoardSignature(Address, Address), // student, council_member -> signature
+    
+    // Task 1: Location Beacon Check-in System
+    AttendanceRecord(Address), // student -> AttendanceRecord struct
+    SickLeaveFlag(Address), // student -> bool
+    LocationBeaconAuthorized(Address), // beacon_address -> bool
+    
+    // Task 2: Stellar Path Payment
+    PreferredLocalAsset(Address), // student -> AssetCode
+    
+    // Task 3: Income-Share Agreement (ISA)
+    ISAContract(Address), // student -> ISAContract struct
+    ISAEmployer(Address), // employer -> bool
+    RepaymentStream(Address), // student -> RepaymentStream struct
+    
+    // Task 4: Vouch/Mentor Boost System
+    MentorProfile(Address), // mentor -> MentorProfile struct
+    VouchRecord(Address), // student -> VouchRecord struct
+    ReputationScore(Address), // address -> u64
 }
 
 #[contracttype]
@@ -218,6 +236,82 @@ pub struct QuizProof {
     pub is_verified: bool,
 }
 
+// Task 1: Location Beacon Check-in System structs
+#[contracttype]
+#[derive(Clone)]
+pub struct AttendanceRecord {
+    pub student: Address,
+    pub last_check_in: u64,
+    pub consecutive_days_present: u64,
+    pub consecutive_days_absent: u64,
+    pub total_check_ins: u64,
+    pub flow_rate_penalty_active: bool,
+    pub penalty_start_time: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub enum AssetCode {
+    EUR,
+    GBP,
+    NGN,
+    KES,
+    GHS,
+    ZAR,
+    USDC,
+}
+
+// Task 3: Income-Share Agreement (ISA) structs
+#[contracttype]
+#[derive(Clone)]
+pub struct ISAContract {
+    pub student: Address,
+    pub total_amount_owed: i128,
+    pub remaining_amount: i128,
+    pub percentage_rate: u32, // e.g., 10 = 10% of income
+    pub minimum_income_threshold: i128,
+    pub repayment_period_months: u64,
+    pub is_active: bool,
+    pub graduation_time: Option<u64>,
+    pub employment_verified: bool,
+    pub employer: Option<Address>,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct RepaymentStream {
+    pub student: Address,
+    pub employer: Address,
+    pub flow_rate: i128,
+    pub total_repaid: i128,
+    pub started_at: u64,
+    pub last_payment: u64,
+    pub is_active: bool,
+}
+
+// Task 4: Vouch/Mentor Boost System structs
+#[contracttype]
+#[derive(Clone)]
+pub struct MentorProfile {
+    pub mentor: Address,
+    pub reputation_score: u64,
+    pub successful_vouches: u64,
+    pub failed_vouches: u64,
+    pub total_vouches: u64,
+    pub is_verified_mentor: bool,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct VouchRecord {
+    pub student: Address,
+    pub mentor: Address,
+    pub vouched_at: u64,
+    pub staking_fee_discount: u32, // Percentage discount
+    pub is_successful: Option<bool>,
+    pub outcome_recorded_at: Option<u64>,
+}
+
 #[contract]
 pub struct ScholarContract;
 
@@ -308,6 +402,9 @@ impl ScholarContract {
             let bonus = (rate * gpa_bonus_percentage as i128) / 100;
             rate += bonus; // Increase rate for high-performing students
         }
+
+        // Apply attendance penalty (decrease rate for poor attendance)
+        rate = Self::apply_attendance_penalty_to_rate(env.clone(), student.clone(), rate);
 
         rate
     }
@@ -2535,6 +2632,679 @@ impl ScholarContract {
     pub fn is_disputed(env: Env, student: Address) -> bool {
         let scholarship: Option<Scholarship> = env.storage().persistent().get(&DataKey::Scholarship(student));
         scholarship.map_or(false, |s| s.is_disputed)
+    }
+
+    // ============================================
+    // Task 1: Location Beacon Check-in System
+    // ============================================
+    
+    pub fn register_location_beacon(env: Env, admin: Address, beacon: Address) {
+        admin.require_auth();
+        
+        if !Self::is_admin(&env, &admin) {
+            panic!("Unauthorized - admin only");
+        }
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::LocationBeaconAuthorized(beacon.clone()), &true);
+        
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "LocationBeacon_Registered"), beacon),
+            true,
+        );
+    }
+
+    pub fn check_in(env: Env, student: Address, beacon: Address, _signature: soroban_sdk::Bytes) {
+        student.require_auth();
+        
+        // Verify beacon is authorized
+        let is_authorized: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LocationBeaconAuthorized(beacon.clone()))
+            .unwrap_or(false);
+        
+        if !is_authorized {
+            panic!("Beacon not authorized");
+        }
+        
+        let current_time = env.ledger().timestamp();
+        let seconds_per_day: u64 = 24 * 60 * 60;
+        
+        // Get or create attendance record
+        let mut attendance: AttendanceRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AttendanceRecord(student.clone()))
+            .unwrap_or(AttendanceRecord {
+                student: student.clone(),
+                last_check_in: 0,
+                consecutive_days_present: 0,
+                consecutive_days_absent: 0,
+                total_check_ins: 0,
+                flow_rate_penalty_active: false,
+                penalty_start_time: None,
+            });
+        
+        // Check if this is a same-day check-in (prevent double check-ins)
+        if attendance.last_check_in > 0 {
+            let time_since_last_checkin = current_time - attendance.last_check_in;
+            if time_since_last_checkin < seconds_per_day {
+                // Already checked in today
+                attendance.total_check_ins += 1;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::AttendanceRecord(student.clone()), &attendance);
+                return;
+            }
+        }
+        
+        // Check if student is on sick leave
+        let on_sick_leave: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SickLeaveFlag(student.clone()))
+            .unwrap_or(false);
+        
+        // Update attendance tracking
+        if attendance.last_check_in > 0 {
+            let days_since_last_checkin = (current_time - attendance.last_check_in) / seconds_per_day;
+            
+            if days_since_last_checkin == 1 {
+                // Consecutive day present
+                attendance.consecutive_days_present += 1;
+                attendance.consecutive_days_absent = 0;
+            } else if days_since_last_checkin > 1 && !on_sick_leave {
+                // Missed days without sick leave
+                attendance.consecutive_days_absent = days_since_last_checkin - 1;
+                
+                // Apply penalty if more than 3 consecutive days missed
+                if attendance.consecutive_days_absent >= 3 {
+                    attendance.flow_rate_penalty_active = true;
+                    attendance.penalty_start_time = Some(current_time);
+                }
+            } else {
+                // Reset absence counter if on sick leave
+                attendance.consecutive_days_absent = 0;
+            }
+        } else {
+            // First check-in
+            attendance.consecutive_days_present = 1;
+        }
+        
+        attendance.last_check_in = current_time;
+        attendance.total_check_ins += 1;
+        
+        // Remove penalty if student has been present for 7 consecutive days
+        if attendance.consecutive_days_present >= 7 {
+            attendance.flow_rate_penalty_active = false;
+            attendance.penalty_start_time = None;
+        }
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::AttendanceRecord(student.clone()), &attendance);
+        
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "CheckIn_Success"), student),
+            (current_time, attendance.consecutive_days_present, attendance.flow_rate_penalty_active),
+        );
+    }
+
+    pub fn set_sick_leave(env: Env, student: Address, is_sick: bool) {
+        student.require_auth();
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::SickLeaveFlag(student.clone()), &is_sick);
+        
+        // If returning from sick leave, reset absence counter
+        if !is_sick {
+            let mut attendance: AttendanceRecord = env
+                .storage()
+                .persistent()
+                .get(&DataKey::AttendanceRecord(student.clone()))
+                .unwrap_or(AttendanceRecord {
+                    student: student.clone(),
+                    last_check_in: 0,
+                    consecutive_days_present: 0,
+                    consecutive_days_absent: 0,
+                    total_check_ins: 0,
+                    flow_rate_penalty_active: false,
+                    penalty_start_time: None,
+                });
+            
+            attendance.consecutive_days_absent = 0;
+            env.storage()
+                .persistent()
+                .set(&DataKey::AttendanceRecord(student.clone()), &attendance);
+        }
+        
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "SickLeave_Updated"), student),
+            is_sick,
+        );
+    }
+
+    pub fn get_attendance_record(env: Env, student: Address) -> Option<AttendanceRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AttendanceRecord(student))
+    }
+
+    fn apply_attendance_penalty_to_rate(env: Env, student: Address, base_rate: i128) -> i128 {
+        let attendance: Option<AttendanceRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AttendanceRecord(student.clone()));
+        
+        if let Some(record) = attendance {
+            if record.flow_rate_penalty_active {
+                // Apply 50% penalty for one week
+                let penalty_duration: u64 = 7 * 24 * 60 * 60; // 7 days in seconds
+                
+                if let Some(penalty_start) = record.penalty_start_time {
+                    let current_time = env.ledger().timestamp();
+                    if current_time - penalty_start < penalty_duration {
+                        // Penalty still active
+                        return base_rate / 2; // 50% reduction
+                    } else {
+                        // Penalty expired
+                        return base_rate;
+                    }
+                }
+            }
+        }
+        
+        base_rate
+    }
+
+    // ============================================
+    // Task 2: Stellar Path Payment Integration
+    // ============================================
+    
+    pub fn set_preferred_local_asset(env: Env, student: Address, asset: AssetCode) {
+        student.require_auth();
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::PreferredLocalAsset(student.clone()), &asset);
+        
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "PreferredAsset_Set"), student),
+            asset,
+        );
+    }
+
+    pub fn withdraw_scholarship_with_path_payment(
+        env: Env,
+        student: Address,
+        amount: i128,
+        destination_asset: AssetCode,
+    ) {
+        student.require_auth();
+        
+        let mut scholarship: Scholarship = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Scholarship(student.clone()))
+            .expect("No scholarship found");
+        
+        if scholarship.is_paused {
+            panic!("Scholarship is paused");
+        }
+        
+        if scholarship.unlocked_balance < amount {
+            panic!("Insufficient unlocked balance");
+        }
+        
+        if scholarship.balance < amount {
+            panic!("Insufficient total balance");
+        }
+        
+        scholarship.balance -= amount;
+        scholarship.unlocked_balance -= amount;
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::Scholarship(student.clone()), &scholarship);
+        
+        // Execute path payment swap
+        let token_client = token::Client::new(&env, &scholarship.token);
+        
+        // Transfer tokens to contract for swap
+        token_client.transfer(&env.current_contract_address(), &student, &amount);
+        
+        // In production, this would call Stellar's path payment API
+        // For now, we emit an event that off-chain infrastructure can listen to
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "PathPayment_Request"), student),
+            (amount, destination_asset, scholarship.token),
+        );
+        
+        // Note: Actual swap execution happens off-chain and results are reported back
+        // This is a simplified version - production would use Soroban's cross-contract calls
+        // to interact with Stellar DEX contracts
+    }
+
+    pub fn get_preferred_local_asset(env: Env, student: Address) -> Option<AssetCode> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PreferredLocalAsset(student))
+    }
+
+    // ============================================
+    // Task 3: Income-Share Agreement (ISA)
+    // ============================================
+    
+    pub fn create_isa_contract(
+        env: Env,
+        admin: Address,
+        student: Address,
+        total_amount: i128,
+        percentage_rate: u32,
+        minimum_income_threshold: i128,
+        repayment_period_months: u64,
+    ) {
+        admin.require_auth();
+        
+        if !Self::is_admin(&env, &admin) {
+            panic!("Unauthorized - admin only");
+        }
+        
+        let current_time = env.ledger().timestamp();
+        
+        let isa = ISAContract {
+            student: student.clone(),
+            total_amount_owed: total_amount,
+            remaining_amount: total_amount,
+            percentage_rate,
+            minimum_income_threshold,
+            repayment_period_months,
+            is_active: true,
+            graduation_time: None,
+            employment_verified: false,
+            employer: None,
+        };
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::ISAContract(student.clone()), &isa);
+        
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "ISA_Contract_Created"), student),
+            (total_amount, percentage_rate, repayment_period_months),
+        );
+    }
+
+    pub fn verify_graduation_and_employment(
+        env: Env,
+        oracle: Address,
+        student: Address,
+        employer: Address,
+        is_employed: bool,
+    ) {
+        oracle.require_auth();
+        
+        // Verify caller is the academic oracle
+        let stored_oracle: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AcademicOracle);
+        
+        if stored_oracle != Some(oracle.clone()) {
+            panic!("Unauthorized - academic oracle only");
+        }
+        
+        let mut isa: ISAContract = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ISAContract(student.clone()))
+            .expect("No ISA contract found");
+        
+        if is_employed {
+            isa.graduation_time = Some(env.ledger().timestamp());
+            isa.employment_verified = true;
+            isa.employer = Some(employer.clone());
+            
+            // Register employer
+            env.storage()
+                .persistent()
+                .set(&DataKey::ISAEmployer(employer.clone()), &true);
+            
+            #[allow(deprecated)]
+            env.events().publish(
+                (Symbol::new(&env, "ISA_Employment_Verified"), student),
+                employer,
+            );
+        }
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::ISAContract(student.clone()), &isa);
+    }
+
+    pub fn start_repayment_stream(
+        env: Env,
+        employer: Address,
+        student: Address,
+        monthly_payment: i128,
+    ) {
+        employer.require_auth();
+        
+        // Verify employer is registered
+        let is_employer: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ISAEmployer(employer.clone()))
+            .unwrap_or(false);
+        
+        if !is_employer {
+            panic!("Employer not verified");
+        }
+        
+        let isa: ISAContract = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ISAContract(student.clone()))
+            .expect("No ISA contract found");
+        
+        if !isa.is_active || !isa.employment_verified {
+            panic!("ISA not active or employment not verified");
+        }
+        
+        let current_time = env.ledger().timestamp();
+        
+        let repayment_stream = RepaymentStream {
+            student: student.clone(),
+            employer: employer.clone(),
+            flow_rate: monthly_payment,
+            total_repaid: 0,
+            started_at: current_time,
+            last_payment: current_time,
+            is_active: true,
+        };
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::RepaymentStream(student.clone()), &repayment_stream);
+        
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "Repayment_Stream_Started"), student),
+            (employer, monthly_payment),
+        );
+    }
+
+    pub fn process_isa_payment(env: Env, student: Address, amount: i128) {
+        let mut isa: ISAContract = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ISAContract(student.clone()))
+            .expect("No ISA contract found");
+        
+        let mut stream: RepaymentStream = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RepaymentStream(student.clone()))
+            .expect("No repayment stream found");
+        
+        if !stream.is_active {
+            panic!("Repayment stream not active");
+        }
+        
+        if amount <= 0 {
+            panic!("Invalid payment amount");
+        }
+        
+        // Cap payment at remaining amount
+        let payment_amount = if amount > isa.remaining_amount {
+            isa.remaining_amount
+        } else {
+            amount
+        };
+        
+        isa.remaining_amount -= payment_amount;
+        stream.total_repaid += payment_amount;
+        stream.last_payment = env.ledger().timestamp();
+        
+        // Transfer payment to scholarship treasury
+        let scholarship: Option<Scholarship> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Scholarship(student.clone()));
+        
+        if let Some(mut sch) = scholarship {
+            sch.balance += payment_amount;
+            env.storage()
+                .persistent()
+                .set(&DataKey::Scholarship(student.clone()), &sch);
+        }
+        
+        // Check if fully repaid
+        if isa.remaining_amount <= 0 {
+            isa.is_active = false;
+            stream.is_active = false;
+        }
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::ISAContract(student.clone()), &isa);
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::RepaymentStream(student.clone()), &stream);
+        
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "ISA_Payment_Processed"), student),
+            (payment_amount, isa.remaining_amount, stream.total_repaid),
+        );
+    }
+
+    pub fn get_isa_contract(env: Env, student: Address) -> Option<ISAContract> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ISAContract(student))
+    }
+
+    pub fn get_repayment_stream(env: Env, student: Address) -> Option<RepaymentStream> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RepaymentStream(student))
+    }
+
+    // ============================================
+    // Task 4: Vouch/Mentor Boost System
+    // ============================================
+    
+    pub fn create_mentor_profile(env: Env, mentor: Address, initial_reputation: u64) {
+        mentor.require_auth();
+        
+        // Only admins can create verified mentors
+        let is_admin = Self::is_admin(&env, &mentor);
+        
+        let profile = MentorProfile {
+            mentor: mentor.clone(),
+            reputation_score: initial_reputation,
+            successful_vouches: 0,
+            failed_vouches: 0,
+            total_vouches: 0,
+            is_verified_mentor: is_admin, // Admins start as verified
+        };
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::MentorProfile(mentor.clone()), &profile);
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::ReputationScore(mentor.clone()), &initial_reputation);
+        
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "Mentor_Profile_Created"), mentor),
+            initial_reputation,
+        );
+    }
+
+    pub fn vouch_for_student(
+        env: Env,
+        mentor: Address,
+        student: Address,
+        staking_fee_discount: u32,
+    ) {
+        mentor.require_auth();
+        
+        // Verify mentor exists
+        let mut mentor_profile: MentorProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MentorProfile(mentor.clone()))
+            .expect("Mentor profile not found");
+        
+        // Check if student already has a vouch
+        let existing_vouch: Option<VouchRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VouchRecord(student.clone()));
+        
+        if existing_vouch.is_some() {
+            panic!("Student already has a vouch record");
+        }
+        
+        let current_time = env.ledger().timestamp();
+        
+        let vouch_record = VouchRecord {
+            student: student.clone(),
+            mentor: mentor.clone(),
+            vouched_at: current_time,
+            staking_fee_discount,
+            is_successful: None,
+            outcome_recorded_at: None,
+        };
+        
+        mentor_profile.total_vouches += 1;
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::VouchRecord(student.clone()), &vouch_record);
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::MentorProfile(mentor.clone()), &mentor_profile);
+        
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "Student_Vouched"), student),
+            (mentor, staking_fee_discount),
+        );
+    }
+
+    pub fn record_student_outcome(
+        env: Env,
+        admin: Address,
+        student: Address,
+        is_successful: bool,
+    ) {
+        admin.require_auth();
+        
+        if !Self::is_admin(&env, &admin) {
+            panic!("Unauthorized - admin only");
+        }
+        
+        let mut vouch_record: VouchRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VouchRecord(student.clone()))
+            .expect("No vouch record found");
+        
+        let mentor = vouch_record.mentor.clone();
+        
+        let mut mentor_profile: MentorProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MentorProfile(mentor.clone()))
+            .expect("Mentor profile not found");
+        
+        let current_time = env.ledger().timestamp();
+        vouch_record.is_successful = Some(is_successful);
+        vouch_record.outcome_recorded_at = Some(current_time);
+        
+        if is_successful {
+            mentor_profile.successful_vouches += 1;
+            mentor_profile.reputation_score += 10; // Bonus for successful vouch
+        } else {
+            mentor_profile.failed_vouches += 1;
+            // Penalize reputation for failed vouch
+            if mentor_profile.reputation_score >= 5 {
+                mentor_profile.reputation_score -= 5;
+            }
+        }
+        
+        // Update reputation score
+        env.storage()
+            .persistent()
+            .set(&DataKey::ReputationScore(mentor.clone()), &mentor_profile.reputation_score);
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::VouchRecord(student.clone()), &vouch_record);
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::MentorProfile(mentor.clone()), &mentor_profile);
+        
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "Vouch_Outcome_Recorded"), student),
+            (is_successful, mentor_profile.reputation_score),
+        );
+    }
+
+    pub fn get_mentor_profile(env: Env, mentor: Address) -> Option<MentorProfile> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MentorProfile(mentor))
+    }
+
+    pub fn get_vouch_record(env: Env, student: Address) -> Option<VouchRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VouchRecord(student))
+    }
+
+    pub fn get_reputation_score(env: Env, address: Address) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ReputationScore(address))
+    }
+
+    pub fn calculate_staking_fee_with_discount(
+        env: Env,
+        student: Address,
+        base_fee: i128,
+    ) -> i128 {
+        let vouch_record: Option<VouchRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VouchRecord(student.clone()));
+        
+        if let Some(record) = vouch_record {
+            if let Some(discount) = record.staking_fee_discount.into() {
+                let discount_amount = (base_fee * discount as i128) / 100;
+                return base_fee - discount_amount;
+            }
+        }
+        
+        base_fee
     }
 }
 
