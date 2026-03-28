@@ -60,6 +60,18 @@ pub enum DataKey {
     ReferralBonusAmount,
     RoyaltySplit(u64), // course_id -> RoyaltySplit
     AcademicOracle,
+    // Research Grant Milestone Escrow keys
+    ResearchGrant(Address), // student -> ResearchGrant struct
+    MilestoneClaim(u64), // milestone_id -> MilestoneClaim struct
+    InvoiceHash(u64), // milestone_id -> invoice hash
+    GrantorApproval(u64), // milestone_id -> approval status
+    StreakBonusAmount,
+    ConsecutiveDays(Address, u64), // student, course_id -> StreakData
+    GroupPool(u64), // pool_id -> GroupPool struct
+    GroupPoolMember(u64, Address), // pool_id, member -> contribution amount
+    GroupPoolAccess(u64, Address), // pool_id, member -> access granted
+    ModuleLockConfig(u64, u64), // course_id, module_id -> requires_quiz
+    ModuleQuizLock(Address, u64, u64), // student, course_id, module_id -> QuizProof
 }
 
 #[contracttype]
@@ -90,6 +102,67 @@ pub struct CourseRegistry {
 #[derive(Clone)]
 pub struct RoyaltySplit {
     pub shares: Vec<(Address, u32)>,
+}
+
+// Research Grant Milestone Escrow structs
+#[contracttype]
+#[derive(Clone)]
+pub struct ResearchGrant {
+    pub student: Address,
+    pub total_amount: i128,
+    pub token: Address,
+    pub granted_at: u64,
+    pub is_active: bool,
+    pub grantor: Address,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct MilestoneClaim {
+    pub milestone_id: u64,
+    pub student: Address,
+    pub amount: i128,
+    pub description: Symbol,
+    pub invoice_hash: Option<Symbol>,
+    pub is_approved: bool,
+    pub is_claimed: bool,
+    pub submitted_at: u64,
+    pub approved_at: Option<u64>,
+    pub claimed_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct StreakData {
+    pub current_streak: u64,
+    pub last_watch_date: u64,
+    pub total_reward_claimed: i128,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct GroupPool {
+    pub pool_id: u64,
+    pub course_id: u64,
+    pub target_amount: i128,
+    pub current_balance: i128,
+    pub creator: Address,
+    pub token: Address,
+    pub is_active: bool,
+    pub member_count: u64,
+    pub created_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct QuizProof {
+    pub student: Address,
+    pub course_id: u64,
+    pub module_id: u64,
+    pub quiz_hash: Symbol,
+    pub score: u64,
+    pub passed_at: u64,
+    pub is_verified: bool,
 }
 
 #[contract]
@@ -1298,6 +1371,248 @@ impl ScholarContract {
             env.storage().persistent().get(&key).unwrap_or(0)
         } else {
             0
+        }
+    }
+
+    // Research Grant Milestone Escrow Functions
+    
+    pub fn create_research_grant(
+        env: Env,
+        grantor: Address,
+        student: Address,
+        total_amount: i128,
+        token: Address,
+    ) -> u64 {
+        grantor.require_auth();
+        
+        // Transfer funds to contract
+        let client = token::Client::new(&env, &token);
+        client.transfer(&grantor, &env.current_contract_address(), &total_amount);
+        
+        // Generate unique grant ID
+        let grant_id: u64 = env.storage().instance()
+            .get(&Symbol::new(&env, "NextGrantId"))
+            .unwrap_or(1);
+        
+        let current_time = env.ledger().timestamp();
+        
+        let research_grant = ResearchGrant {
+            student: student.clone(),
+            total_amount,
+            token: token.clone(),
+            granted_at: current_time,
+            is_active: true,
+            grantor: grantor.clone(),
+        };
+        
+        // Store the grant
+        env.storage().persistent().set(&DataKey::ResearchGrant(student), &research_grant);
+        env.storage().persistent().extend_ttl(&DataKey::ResearchGrant(student), LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+        
+        // Increment next grant ID
+        env.storage().instance().set(&Symbol::new(&env, "NextGrantId"), &(grant_id + 1));
+        
+        // Emit event
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "Research_Grant_Created"), grantor, student),
+            (grant_id, total_amount)
+        );
+        
+        grant_id
+    }
+    
+    pub fn submit_milestone_claim(
+        env: Env,
+        student: Address,
+        milestone_id: u64,
+        amount: i128,
+        description: Symbol,
+        invoice_hash: Symbol,
+    ) {
+        student.require_auth();
+        
+        // Verify student has an active research grant
+        let research_grant: ResearchGrant = env.storage().persistent()
+            .get(&DataKey::ResearchGrant(student.clone()))
+            .expect("No active research grant found");
+        
+        if !research_grant.is_active {
+            env.panic_with_error((
+                soroban_sdk::xdr::ScErrorType::Contract,
+                soroban_sdk::xdr::ScErrorCode::InvalidAction,
+            ));
+        }
+        
+        let current_time = env.ledger().timestamp();
+        
+        let milestone_claim = MilestoneClaim {
+            milestone_id,
+            student: student.clone(),
+            amount,
+            description: description.clone(),
+            invoice_hash: Some(invoice_hash.clone()),
+            is_approved: false,
+            is_claimed: false,
+            submitted_at: current_time,
+            approved_at: None,
+            claimed_at: None,
+        };
+        
+        // Store the milestone claim
+        env.storage().persistent().set(&DataKey::MilestoneClaim(milestone_id), &milestone_claim);
+        env.storage().persistent().set(&DataKey::InvoiceHash(milestone_id), &invoice_hash);
+        env.storage().persistent().extend_ttl(&DataKey::MilestoneClaim(milestone_id), LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+        env.storage().persistent().extend_ttl(&DataKey::InvoiceHash(milestone_id), LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+        
+        // Emit event
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "Milestone_Claim_Submitted"), student, milestone_id),
+            (amount, description, invoice_hash)
+        );
+    }
+    
+    pub fn approve_milestone_claim(
+        env: Env,
+        grantor: Address,
+        milestone_id: u64,
+    ) {
+        grantor.require_auth();
+        
+        let mut milestone_claim: MilestoneClaim = env.storage().persistent()
+            .get(&DataKey::MilestoneClaim(milestone_id))
+            .expect("Milestone claim not found");
+        
+        // Verify grantor is the one who created the research grant
+        let research_grant: ResearchGrant = env.storage().persistent()
+            .get(&DataKey::ResearchGrant(milestone_claim.student.clone()))
+            .expect("Research grant not found");
+        
+        if research_grant.grantor != grantor {
+            env.panic_with_error((
+                soroban_sdk::xdr::ScErrorType::Contract,
+                soroban_sdk::xdr::ScErrorCode::InvalidAction,
+            ));
+        }
+        
+        if milestone_claim.is_approved {
+            env.panic_with_error((
+                soroban_sdk::xdr::ScErrorType::Contract,
+                soroban_sdk::xdr::ScErrorCode::InvalidAction,
+            ));
+        }
+        
+        let current_time = env.ledger().timestamp();
+        
+        milestone_claim.is_approved = true;
+        milestone_claim.approved_at = Some(current_time);
+        
+        // Store approval status
+        env.storage().persistent().set(&DataKey::MilestoneClaim(milestone_id), &milestone_claim);
+        env.storage().persistent().set(&DataKey::GrantorApproval(milestone_id), &true);
+        env.storage().persistent().extend_ttl(&DataKey::MilestoneClaim(milestone_id), LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+        env.storage().persistent().extend_ttl(&DataKey::GrantorApproval(milestone_id), LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+        
+        // Emit event
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "Milestone_Claim_Approved"), grantor, milestone_claim.student.clone()),
+            (milestone_id, milestone_claim.amount)
+        );
+    }
+    
+    pub fn claim_milestone_lump_sum(
+        env: Env,
+        student: Address,
+        milestone_id: u64,
+    ) {
+        student.require_auth();
+        
+        let mut milestone_claim: MilestoneClaim = env.storage().persistent()
+            .get(&DataKey::MilestoneClaim(milestone_id))
+            .expect("Milestone claim not found");
+        
+        // Verify the claim belongs to this student
+        if milestone_claim.student != student {
+            env.panic_with_error((
+                soroban_sdk::xdr::ScErrorType::Contract,
+                soroban_sdk::xdr::ScErrorCode::InvalidAction,
+            ));
+        }
+        
+        // Verify claim is approved but not yet claimed
+        if !milestone_claim.is_approved || milestone_claim.is_claimed {
+            env.panic_with_error((
+                soroban_sdk::xdr::ScErrorType::Contract,
+                soroban_sdk::xdr::ScErrorCode::InvalidAction,
+            ));
+        }
+        
+        // Get the research grant to get token info
+        let research_grant: ResearchGrant = env.storage().persistent()
+            .get(&DataKey::ResearchGrant(student.clone()))
+            .expect("Research grant not found");
+        
+        let current_time = env.ledger().timestamp();
+        
+        // Mark as claimed
+        milestone_claim.is_claimed = true;
+        milestone_claim.claimed_at = Some(current_time);
+        
+        // Update storage
+        env.storage().persistent().set(&DataKey::MilestoneClaim(milestone_id), &milestone_claim);
+        env.storage().persistent().extend_ttl(&DataKey::MilestoneClaim(milestone_id), LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+        
+        // Transfer lump sum from treasury to student
+        let client = token::Client::new(&env, &research_grant.token);
+        client.transfer(&env.current_contract_address(), &student, &milestone_claim.amount);
+        
+        // Emit event
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "Milestone_Lump_Sum_Claimed"), student, milestone_id),
+            (milestone_claim.amount, current_time)
+        );
+    }
+    
+    pub fn get_milestone_claim(env: Env, milestone_id: u64) -> MilestoneClaim {
+        let key = DataKey::MilestoneClaim(milestone_id);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+            env.storage().persistent().get(&key).expect("Milestone claim not found")
+        } else {
+            panic!("Milestone claim not found");
+        }
+    }
+    
+    pub fn get_research_grant(env: Env, student: Address) -> ResearchGrant {
+        let key = DataKey::ResearchGrant(student);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+            env.storage().persistent().get(&key).expect("Research grant not found")
+        } else {
+            panic!("Research grant not found");
+        }
+    }
+    
+    pub fn get_invoice_hash(env: Env, milestone_id: u64) -> Option<Symbol> {
+        let key = DataKey::InvoiceHash(milestone_id);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+            env.storage().persistent().get(&key)
+        } else {
+            None
+        }
+    }
+    
+    pub fn is_milestone_approved(env: Env, milestone_id: u64) -> bool {
+        let key = DataKey::GrantorApproval(milestone_id);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+            env.storage().persistent().get(&key).unwrap_or(false)
+        } else {
+            false
         }
     }
 

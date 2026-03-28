@@ -1260,3 +1260,250 @@ fn test_creator_royalty_split_unauthorized() {
     let shares = vec![&env, (teacher.clone(), 70u32), (editor.clone(), 30u32)];
     client.set_royalty_split(&unauthorized, &1, &shares);
 }
+
+// Research Grant Milestone Escrow Tests
+
+#[test]
+fn test_research_grant_milestone_escrow_flow() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let grantor = Address::generate(&env);
+    let student = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    // Deploy a token for testing
+    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
+    token_client.mint(&grantor, &10000);
+
+    // Deploy the scholarship contract
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+
+    // Initialize the contract
+    client.init(&10, &3600, &10, &100, &60);
+
+    // Create a research grant for $5,000 lab equipment
+    let grant_id = client.create_research_grant(
+        &grantor,
+        &student,
+        &5000,
+        &token_address.address()
+    );
+
+    // Verify grant creation
+    assert_eq!(grant_id, 1);
+    
+    // Check grant details
+    let research_grant = client.get_research_grant(&student);
+    assert_eq!(research_grant.student, student);
+    assert_eq!(research_grant.total_amount, 5000);
+    assert_eq!(research_grant.grantor, grantor);
+    assert!(research_grant.is_active);
+
+    // Verify token transfer to contract
+    assert_eq!(
+        token::Client::new(&env, &token_address.address()).balance(&grantor),
+        5000
+    );
+    assert_eq!(
+        token::Client::new(&env, &token_address.address()).balance(&contract_id),
+        5000
+    );
+
+    // Submit milestone claim for lab equipment purchase
+    let invoice_hash = Symbol::new(&env, "invoice_hash_123");
+    let description = Symbol::new(&env, "Lab Equipment Purchase");
+    
+    client.submit_milestone_claim(
+        &student,
+        &1, // milestone_id
+        &5000,
+        &description,
+        &invoice_hash
+    );
+
+    // Verify milestone claim submission
+    let milestone_claim = client.get_milestone_claim(&1);
+    assert_eq!(milestone_claim.milestone_id, 1);
+    assert_eq!(milestone_claim.student, student);
+    assert_eq!(milestone_claim.amount, 5000);
+    assert_eq!(milestone_claim.description, description);
+    assert_eq!(milestone_claim.invoice_hash.unwrap(), invoice_hash);
+    assert!(!milestone_claim.is_approved);
+    assert!(!milestone_claim.is_claimed);
+
+    // Verify invoice hash storage
+    let stored_invoice_hash = client.get_invoice_hash(&1);
+    assert_eq!(stored_invoice_hash.unwrap(), invoice_hash);
+
+    // Grantor approves the milestone claim
+    client.approve_milestone_claim(&grantor, &1);
+
+    // Verify approval
+    let approved_claim = client.get_milestone_claim(&1);
+    assert!(approved_claim.is_approved);
+    assert!(approved_claim.approved_at.is_some());
+    assert!(!approved_claim.is_claimed);
+
+    // Verify approval status
+    assert!(client.is_milestone_approved(&1));
+
+    // Student claims the lump sum
+    client.claim_milestone_lump_sum(&student, &1);
+
+    // Verify claim completion
+    let claimed_milestone = client.get_milestone_claim(&1);
+    assert!(claimed_milestone.is_claimed);
+    assert!(claimed_milestone.claimed_at.is_some());
+
+    // Verify lump sum transfer to student
+    assert_eq!(
+        token::Client::new(&env, &token_address.address()).balance(&student),
+        5000
+    );
+    assert_eq!(
+        token::Client::new(&env, &token_address.address()).balance(&contract_id),
+        0
+    );
+}
+
+#[test]
+fn test_milestone_claim_validation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let grantor = Address::generate(&env);
+    let student = Address::generate(&env);
+    let other_student = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
+    token_client.mint(&grantor, &5000);
+
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+
+    client.init(&10, &3600, &10, &100, &60);
+
+    // Create research grant
+    client.create_research_grant(&grantor, &student, &5000, &token_address.address());
+
+    // Submit milestone claim
+    let invoice_hash = Symbol::new(&env, "invoice_hash_123");
+    let description = Symbol::new(&env, "Lab Equipment");
+    
+    client.submit_milestone_claim(&student, &1, &5000, &description, &invoice_hash);
+
+    // Try to claim without approval - should fail
+    env.mock_auths(&[
+        &student.authenticate(&client.claim_milestone_lump_sum(&student, &1)),
+    ]);
+    env.mock_all_auths(); // Reset
+
+    // Approve the claim
+    client.approve_milestone_claim(&grantor, &1);
+
+    // Try to claim with wrong student - should fail
+    env.mock_auths(&[
+        &other_student.authenticate(&client.claim_milestone_lump_sum(&other_student, &1)),
+    ]);
+    env.mock_all_auths(); // Reset
+
+    // Successful claim
+    client.claim_milestone_lump_sum(&student, &1);
+
+    // Try to claim again - should fail
+    env.mock_auths(&[
+        &student.authenticate(&client.claim_milestone_lump_sum(&student, &1)),
+    ]);
+    env.mock_all_auths(); // Reset
+}
+
+#[test]
+fn test_grantor_authorization() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let grantor = Address::generate(&env);
+    let other_grantor = Address::generate(&env);
+    let student = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
+    token_client.mint(&grantor, &5000);
+
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+
+    client.init(&10, &3600, &10, &100, &60);
+
+    // Create research grant
+    client.create_research_grant(&grantor, &student, &5000, &token_address.address());
+
+    // Submit milestone claim
+    let invoice_hash = Symbol::new(&env, "invoice_hash_123");
+    let description = Symbol::new(&env, "Lab Equipment");
+    
+    client.submit_milestone_claim(&student, &1, &5000, &description, &invoice_hash);
+
+    // Try to approve with wrong grantor - should fail
+    env.mock_auths(&[
+        &other_grantor.authenticate(&client.approve_milestone_claim(&other_grantor, &1)),
+    ]);
+    env.mock_all_auths(); // Reset
+
+    // Successful approval by correct grantor
+    client.approve_milestone_claim(&grantor, &1);
+}
+
+#[test]
+fn test_research_grant_with_scholarship_coexistence() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let grantor = Address::generate(&env);
+    let student = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
+    token_client.mint(&grantor, &10000);
+
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+
+    client.init(&10, &3600, &10, &100, &60);
+
+    // Fund a regular scholarship for living stipend
+    client.fund_scholarship(&grantor, &student, &2000, &token_address.address());
+
+    // Create a research grant for equipment
+    client.create_research_grant(&grantor, &student, &5000, &token_address.address());
+
+    // Verify both coexist
+    let scholarship = client.get_scholarship(&student);
+    assert_eq!(scholarship.balance, 2000);
+
+    let research_grant = client.get_research_grant(&student);
+    assert_eq!(research_grant.total_amount, 5000);
+
+    // Submit and claim milestone - should not affect scholarship
+    let invoice_hash = Symbol::new(&env, "invoice_hash_123");
+    let description = Symbol::new(&env, "Lab Equipment");
+    
+    client.submit_milestone_claim(&student, &1, &5000, &description, &invoice_hash);
+    client.approve_milestone_claim(&grantor, &1);
+    client.claim_milestone_lump_sum(&student, &1);
+
+    // Verify scholarship is still intact
+    let scholarship_after = client.get_scholarship(&student);
+    assert_eq!(scholarship_after.balance, 2000);
+
+    // Verify milestone claim is processed
+    let claimed_milestone = client.get_milestone_claim(&1);
+    assert!(claimed_milestone.is_claimed);
+}
