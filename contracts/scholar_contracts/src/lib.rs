@@ -6,9 +6,8 @@ use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Sym
 // --- Constants for TTL Management ---
 const LEDGER_BUMP_THRESHOLD: u32 = 123456; // Example threshold
 const LEDGER_BUMP_EXTEND: u32 = 789012;    // Example extension
-const MAX_COURSE_REGISTRY_SIZE: u64 = 1000;
-const EARLY_DROP_WINDOW_SECONDS: u64 = 300; // 5 minutes
 const MAX_COURSE_REGISTRY_SIZE: u64 = 1000; // Maximum number of courses to prevent gas limit issues
+const EARLY_DROP_WINDOW_SECONDS: u64 = 300; // 5 minutes
 
 // GPA Bonus Constants
 const GPA_BONUS_THRESHOLD: u64 = 35; // 3.5 GPA threshold (stored as 35 to avoid floating point)
@@ -98,6 +97,10 @@ pub enum DataKey {
     
     // Task 3: Income-Share Agreement (ISA)
     ISAContract(Address), // student -> ISAContract struct
+    
+    // Donation Stream for Free Courses
+    DonationStream(Address, u64), // student, course_id -> DonationStream struct
+    CourseDonations(u64), // course_id -> total donations received
     ISAEmployer(Address), // employer -> bool
     RepaymentStream(Address), // student -> RepaymentStream struct
     
@@ -117,11 +120,24 @@ pub struct SubscriptionTier {
 
 #[contracttype]
 #[derive(Clone)]
+pub struct DonationStream {
+    pub student: Address,
+    pub course_id: u64,
+    pub total_donated: i128,
+    pub token: Address,
+    pub start_time: u64,
+    pub last_donation_time: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
 pub struct CourseInfo {
     pub course_id: u64,
     pub created_at: u64,
     pub is_active: bool,
     pub creator: Address,
+    pub is_free: bool,
+    pub accept_donations: bool,
 }
 
 #[contracttype]
@@ -475,10 +491,6 @@ impl ScholarContract {
             (Symbol::new(&env, "Access_Purchased"), student.clone(), course_id),
             (actual_cost, university_share, student_share, seconds_bought)
         );
-    }
-
-        // Distribute royalties
-        Self::distribute_royalty(&env, course_id, actual_cost, &token);
     }
 
     pub fn heartbeat(env: Env, student: Address, course_id: u64, _signature: soroban_sdk::Bytes) {
@@ -1033,7 +1045,7 @@ impl ScholarContract {
                 // Emit event showing the recalculated rate and remaining time
                 #[allow(deprecated)]
                 env.events().publish(
-                    (Symbol::new(&env, "Drip_Rate_Recalculated"), student),
+                    (Symbol::new(&env, "Drip_Rate_Recalculated"), student.clone()),
                     (new_rate, remaining_seconds, gpa_bonus_percentage),
                 );
             }
@@ -1059,7 +1071,7 @@ impl ScholarContract {
 
         #[allow(deprecated)]
         env.events().publish(
-            (Symbol::new(&env, "Scholarship_Status_Updated"), student),
+            (Symbol::new(&env, "Scholarship_Status_Updated"), student.clone()),
             status,
         );
     }
@@ -1218,9 +1230,9 @@ impl ScholarContract {
         
         env.storage()
             .persistent()
-            .set(&DataKey::TuitionStipendSplit(student), &split_config);
+            .set(&DataKey::TuitionStipendSplit(student.clone()), &split_config);
         env.storage().persistent().extend_ttl(
-            &DataKey::TuitionStipendSplit(student),
+            &DataKey::TuitionStipendSplit(student.clone()),
             LEDGER_BUMP_THRESHOLD,
             LEDGER_BUMP_EXTEND,
         );
@@ -1234,7 +1246,7 @@ impl ScholarContract {
     }
     
     pub fn get_tuition_stipend_split(env: Env, student: Address) -> Option<TuitionStipendSplit> {
-        let key = DataKey::TuitionStipendSplit(student);
+        let key = DataKey::TuitionStipendSplit(student.clone());
         let split = env.storage().persistent().get(&key);
         if split.is_some() {
             env.storage()
@@ -1253,7 +1265,7 @@ impl ScholarContract {
         let split: Option<TuitionStipendSplit> = env
             .storage()
             .persistent()
-            .get(&DataKey::TuitionStipendSplit(student));
+            .get(&DataKey::TuitionStipendSplit(student.clone()));
         
         let client = token::Client::new(env, token);
         
@@ -1289,7 +1301,7 @@ impl ScholarContract {
 
     // Course Registry Management Functions
 
-    pub fn add_course_to_registry(env: Env, course_id: u64, creator: Address) {
+    pub fn add_course_to_registry(env: Env, course_id: u64, creator: Address, is_free: bool, accept_donations: bool) {
         creator.require_auth();
 
         // Check if course already exists
@@ -1322,6 +1334,8 @@ impl ScholarContract {
             created_at: current_time,
             is_active: true,
             creator: creator.clone(),
+            is_free,
+            accept_donations,
         };
         env.storage()
             .persistent()
@@ -1554,6 +1568,125 @@ impl ScholarContract {
         removed_count
     }
 
+    // Donation Stream Functions for Free Courses
+
+    pub fn donate_to_instructor(
+        env: Env,
+        student: Address,
+        course_id: u64,
+        amount: i128,
+        token: Address,
+    ) {
+        student.require_auth();
+
+        // Get course information
+        let course_info: CourseInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CourseInfo(course_id))
+            .unwrap_or_else(|| panic!("Course not found"));
+
+        // Verify course is free and accepts donations
+        if !course_info.is_free {
+            panic!("Course is not free");
+        }
+        if !course_info.accept_donations {
+            panic!("Course does not accept donations");
+        }
+
+        // Perform token transfer from student to contract
+        let client = token::Client::new(&env, &token);
+        client.transfer(&student, &env.current_contract_address(), &amount);
+
+        // Transfer donation to instructor
+        client.transfer(&env.current_contract_address(), &course_info.creator, &amount);
+
+        // Update donation stream record
+        let current_time = env.ledger().timestamp();
+        let donation_key = DataKey::DonationStream(student.clone(), course_id);
+        let mut donation_stream: DonationStream = env
+            .storage()
+            .persistent()
+            .get(&donation_key)
+            .unwrap_or(DonationStream {
+                student: student.clone(),
+                course_id,
+                total_donated: 0,
+                token: token.clone(),
+                start_time: current_time,
+                last_donation_time: current_time,
+            });
+
+        donation_stream.total_donated += amount;
+        donation_stream.last_donation_time = current_time;
+
+        env.storage()
+            .persistent()
+            .set(&donation_key, &donation_stream);
+        env.storage().persistent().extend_ttl(
+            &donation_key,
+            LEDGER_BUMP_THRESHOLD,
+            LEDGER_BUMP_EXTEND,
+        );
+
+        // Update course total donations
+        let course_donations_key = DataKey::CourseDonations(course_id);
+        let mut total_donations: i128 = env
+            .storage()
+            .persistent()
+            .get(&course_donations_key)
+            .unwrap_or(0);
+        total_donations += amount;
+
+        env.storage()
+            .persistent()
+            .set(&course_donations_key, &total_donations);
+        env.storage().persistent().extend_ttl(
+            &course_donations_key,
+            LEDGER_BUMP_THRESHOLD,
+            LEDGER_BUMP_EXTEND,
+        );
+
+        // Emit donation event
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "Donation_Made"), student, course_id),
+            (amount, course_info.creator, total_donations)
+        );
+    }
+
+    pub fn get_donation_stream(env: Env, student: Address, course_id: u64) -> Option<DonationStream> {
+        let donation_key = DataKey::DonationStream(student.clone(), course_id);
+        let donation_stream: Option<DonationStream> = env.storage().persistent().get(&donation_key);
+        
+        if donation_stream.is_some() {
+            env.storage().persistent().extend_ttl(
+                &donation_key,
+                LEDGER_BUMP_THRESHOLD,
+                LEDGER_BUMP_EXTEND,
+            );
+        }
+        
+        donation_stream
+    }
+
+    pub fn get_course_total_donations(env: Env, course_id: u64) -> i128 {
+        let course_donations_key = DataKey::CourseDonations(course_id);
+        let total_donations: i128 = env
+            .storage()
+            .persistent()
+            .get(&course_donations_key)
+            .unwrap_or(0);
+
+        env.storage().persistent().extend_ttl(
+            &course_donations_key,
+            LEDGER_BUMP_THRESHOLD,
+            LEDGER_BUMP_EXTEND,
+        );
+
+        total_donations
+    }
+
     // Referral System
 
     pub fn set_referral_bonus_amount(env: Env, admin: Address, amount: u64) {
@@ -1685,8 +1818,8 @@ impl ScholarContract {
         };
         
         // Store the grant
-        env.storage().persistent().set(&DataKey::ResearchGrant(student), &research_grant);
-        env.storage().persistent().extend_ttl(&DataKey::ResearchGrant(student), LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+        env.storage().persistent().set(&DataKey::ResearchGrant(student.clone()), &research_grant);
+        env.storage().persistent().extend_ttl(&DataKey::ResearchGrant(student.clone()), LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
         
         // Increment next grant ID
         env.storage().instance().set(&Symbol::new(&env, "NextGrantId"), &(grant_id + 1));
@@ -1866,7 +1999,7 @@ impl ScholarContract {
     }
     
     pub fn get_research_grant(env: Env, student: Address) -> ResearchGrant {
-        let key = DataKey::ResearchGrant(student);
+        let key = DataKey::ResearchGrant(student.clone());
         if env.storage().persistent().has(&key) {
             env.storage().persistent().extend_ttl(&key, LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
             env.storage().persistent().get(&key).expect("Research grant not found")
@@ -2566,7 +2699,7 @@ impl ScholarContract {
 
         scholarship.is_paused = true;
         scholarship.is_disputed = true;
-        scholarship.dispute_reason = Some(request.reason);
+        scholarship.dispute_reason = Some(request.reason.clone());
 
         env.storage()
             .persistent()
@@ -2574,8 +2707,8 @@ impl ScholarContract {
 
         #[allow(deprecated)]
         env.events().publish(
-            (Symbol::new(&env, "Board_Pause_Executed"), student),
-            (request.signatures.len(), request.reason)
+            (Symbol::new(&env, "Board_Pause_Executed"), student.clone()),
+            (request.signatures.len(), request.reason.clone())
         );
     }
 
@@ -2749,7 +2882,7 @@ impl ScholarContract {
         
         #[allow(deprecated)]
         env.events().publish(
-            (Symbol::new(&env, "CheckIn_Success"), student),
+            (Symbol::new(&env, "CheckIn_Success"), student.clone()),
             (current_time, attendance.consecutive_days_present, attendance.flow_rate_penalty_active),
         );
     }
@@ -2785,7 +2918,7 @@ impl ScholarContract {
         
         #[allow(deprecated)]
         env.events().publish(
-            (Symbol::new(&env, "SickLeave_Updated"), student),
+            (Symbol::new(&env, "SickLeave_Updated"), student.clone()),
             is_sick,
         );
     }
@@ -2836,7 +2969,7 @@ impl ScholarContract {
         
         #[allow(deprecated)]
         env.events().publish(
-            (Symbol::new(&env, "PreferredAsset_Set"), student),
+            (Symbol::new(&env, "PreferredAsset_Set"), student.clone()),
             asset,
         );
     }
@@ -2884,7 +3017,7 @@ impl ScholarContract {
         // For now, we emit an event that off-chain infrastructure can listen to
         #[allow(deprecated)]
         env.events().publish(
-            (Symbol::new(&env, "PathPayment_Request"), student),
+            (Symbol::new(&env, "PathPayment_Request"), student.clone()),
             (amount, destination_asset, scholarship.token),
         );
         
@@ -2939,7 +3072,7 @@ impl ScholarContract {
         
         #[allow(deprecated)]
         env.events().publish(
-            (Symbol::new(&env, "ISA_Contract_Created"), student),
+            (Symbol::new(&env, "ISA_Contract_Created"), student.clone()),
             (total_amount, percentage_rate, repayment_period_months),
         );
     }
@@ -2981,7 +3114,7 @@ impl ScholarContract {
             
             #[allow(deprecated)]
             env.events().publish(
-                (Symbol::new(&env, "ISA_Employment_Verified"), student),
+                (Symbol::new(&env, "ISA_Employment_Verified"), student.clone()),
                 employer,
             );
         }
@@ -3038,7 +3171,7 @@ impl ScholarContract {
         
         #[allow(deprecated)]
         env.events().publish(
-            (Symbol::new(&env, "Repayment_Stream_Started"), student),
+            (Symbol::new(&env, "Repayment_Stream_Started"), student.clone()),
             (employer, monthly_payment),
         );
     }
@@ -3104,7 +3237,7 @@ impl ScholarContract {
         
         #[allow(deprecated)]
         env.events().publish(
-            (Symbol::new(&env, "ISA_Payment_Processed"), student),
+            (Symbol::new(&env, "ISA_Payment_Processed"), student.clone()),
             (payment_amount, isa.remaining_amount, stream.total_repaid),
         );
     }
@@ -3203,7 +3336,7 @@ impl ScholarContract {
         
         #[allow(deprecated)]
         env.events().publish(
-            (Symbol::new(&env, "Student_Vouched"), student),
+            (Symbol::new(&env, "Student_Vouched"), student.clone()),
             (mentor, staking_fee_discount),
         );
     }
@@ -3264,7 +3397,7 @@ impl ScholarContract {
         
         #[allow(deprecated)]
         env.events().publish(
-            (Symbol::new(&env, "Vouch_Outcome_Recorded"), student),
+            (Symbol::new(&env, "Vouch_Outcome_Recorded"), student.clone()),
             (is_successful, mentor_profile.reputation_score),
         );
     }
