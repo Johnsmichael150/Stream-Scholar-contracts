@@ -498,7 +498,7 @@ fn test_scholarship_role() {
     client.set_teacher(&admin, &teacher, &true);
 
     // 2. Fund scholarship for student
-    client.fund_scholarship(&funder, &student, &500, &token_address.address());
+    client.fund_scholarship(&funder, &student, &500, &token_address.address(), &Symbol::new(&env, "default_roadmap"));
 
     // Verify contract has tokens and student has balance
     let token = token::Client::new(&env, &token_address.address());
@@ -683,7 +683,7 @@ fn test_calculate_remaining_airtime() {
 
     assert_eq!(client.calculate_remaining_airtime(&student), 0);
 
-    client.fund_scholarship(&funder, &student, &500, &token_address.address());
+    client.fund_scholarship(&funder, &student, &500, &token_address.address(), &Symbol::new(&env, "default_roadmap"));
 
     assert_eq!(client.calculate_remaining_airtime(&student), 50);
 }
@@ -705,7 +705,7 @@ fn test_calculate_remaining_airtime_zero_flow_rate() {
     let client = ScholarContractClient::new(&env, &contract_id);
 
     client.init(&0, &3600, &10, &100, &60);
-    client.fund_scholarship(&funder, &student, &500, &token_address.address());
+    client.fund_scholarship(&funder, &student, &500, &token_address.address(), &Symbol::new(&env, "default_roadmap"));
 
     assert_eq!(client.calculate_remaining_airtime(&student), 0);
 }
@@ -775,7 +775,7 @@ fn test_scholarship_withdrawal() {
 
     // 1. Initial funding
     client.init(&10, &3600, &10, &100, &60);
-    client.fund_scholarship(&funder, &student, &500, &token_address.address());
+    client.fund_scholarship(&funder, &student, &500, &token_address.address(), &Symbol::new(&env, "default_roadmap"));
 
     // 2. Register Mock Oracle and Verify
     let oracle_id = env.register(MockOracle, ());
@@ -835,7 +835,7 @@ fn test_academic_oracle_hook() {
     let oracle_id = env.register(MockOracle, ());
     client.set_academic_oracle(&admin, &oracle_id);
 
-    client.fund_scholarship(&funder, &student, &50000, &token_address.address());
+    client.fund_scholarship(&funder, &student, &50000, &token_address.address(), &Symbol::new(&env, "default_roadmap"));
 
     // Should fail withdrawal before verification
     let result = env.try_invoke_contract::<(), soroban_sdk::Error>(
@@ -1458,7 +1458,7 @@ fn test_research_grant_with_scholarship_coexistence() {
     client.init(&10, &3600, &10, &100, &60);
 
     // Fund a regular scholarship for living stipend
-    client.fund_scholarship(&grantor, &student, &2000, &token_address.address());
+    client.fund_scholarship(&grantor, &student, &2000, &token_address.address(), &Symbol::new(&env, "default_roadmap"));
 
     // Create a research grant for equipment
     client.create_research_grant(&grantor, &student, &5000, &token_address.address());
@@ -1546,7 +1546,7 @@ fn test_board_pause_request_and_execution() {
     client.init_deans_council(&admin, &council_members, &2);
 
     // Fund a scholarship for the student
-    client.fund_scholarship(&funder, &student, &1000, &token_address.address());
+    client.fund_scholarship(&funder, &student, &1000, &token_address.address(), &Symbol::new(&env, "default_roadmap"));
 
     // Verify initial state - not disputed
     assert!(!client.is_disputed(&student));
@@ -1613,7 +1613,7 @@ fn test_disputed_student_cannot_access_courses() {
     client.init_deans_council(&admin, &council_members, &2);
 
     // Fund scholarship and buy course access
-    client.fund_scholarship(&funder, &student, &1000, &token_address.address());
+    client.fund_scholarship(&funder, &student, &1000, &token_address.address(), &Symbol::new(&env, "default_roadmap"));
     client.buy_access(&student, &1, &100, &token_address.address());
 
     // Verify initial access
@@ -1657,7 +1657,7 @@ fn test_final_ruling_upload() {
     client.init_deans_council(&admin, &council_members, &2);
 
     // Fund scholarship
-    client.fund_scholarship(&funder, &student, &1000, &token_address.address());
+    client.fund_scholarship(&funder, &student, &1000, &token_address.address(), &Symbol::new(&env, "default_roadmap"));
 
     // Execute board pause
     let reason = Symbol::new(&env, "plagiarism_confirmed");
@@ -1889,7 +1889,7 @@ fn test_drip_recalculation_on_gpa_change() {
     client.set_academic_oracle(&admin, &oracle);
 
     // Fund scholarship
-    client.fund_scholarship(&funder, &student, &5000, &token_address.address());
+    client.fund_scholarship(&funder, &student, &5000, &token_address.address(), &Symbol::new(&env, "default_roadmap"));
 
     // Report initial GPA 3.6 (2% bonus)
     client.report_student_gpa(&oracle, &student, &36);
@@ -2297,7 +2297,7 @@ fn test_tutoring_payment_processing() {
     );
 
     // Fund scholarship (this should process tutoring payment)
-    client.fund_scholarship(&scholar, &scholar, &1000, &token_address.address());
+    client.fund_scholarship(&scholar, &scholar, &1000, &token_address.address(), &Symbol::new(&env, "default_roadmap"));
 
     // The test verifies the function doesn't panic
     // In a real scenario, we'd check the tutor's balance
@@ -2452,7 +2452,7 @@ fn test_probation_start_and_recovery() {
 
     // Fund scholarship for student
     token_client.mint(&admin, &1000);
-    client.fund_scholarship(&admin, &student, &1000, &token_address.address());
+    client.fund_scholarship(&admin, &student, &1000, &token_address.address(), &Symbol::new(&env, "default_roadmap"));
 
     // Update GPA below threshold (should start probation)
     client.update_student_gpa(&oracle, &student, &20); // 2.0 GPA < 2.5 threshold
@@ -2496,7 +2496,7 @@ fn test_permanent_revocation_after_warning_period() {
 
     // Fund scholarship
     token_client.mint(&admin, &1000);
-    client.fund_scholarship(&admin, &student, &1000, &token_address.address());
+    client.fund_scholarship(&admin, &student, &1000, &token_address.address(), &Symbol::new(&env, "default_roadmap"));
 
     // Start probation with low GPA
     client.update_student_gpa(&oracle, &student, &20); // 2.0 GPA

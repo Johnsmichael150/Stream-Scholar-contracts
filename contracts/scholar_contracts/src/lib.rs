@@ -1,5 +1,10 @@
 #![no_std]
 
+use soroban_sdk::{contract, contractimpl, contracttype, Env, Address, Symbol, Bytes, Vec, token};
+
+// Import expiry_math utilities from the crate
+use expiry_math::checked_access_expiry;
+
 // Constants for ledger bump and GPA bonus calculations
 const LEDGER_BUMP_THRESHOLD: u32 = 7776000; // ~90 days
 const LEDGER_BUMP_EXTEND: u32 = 7776000;   // ~90 days
@@ -46,6 +51,7 @@ pub enum Event {
     ProbationStarted(Address, u64), // student, warning_period_end
     ProbationEnded(Address, bool), // student, recovered
     StreamRevoked(Address), // student
+    GroupRevocation(Vec<Address>, i128), // students, total_refunded_amount
 }
 
 
@@ -72,6 +78,7 @@ pub struct Scholarship {
     pub is_disputed: bool,
     pub dispute_reason: Option<Symbol>,
     pub final_ruling: Option<Symbol>,
+    pub roadmap_id: Symbol, // IPFS reference to educational roadmap
 }
 
 // Issue #92: Anonymized Leaderboard for Top Scholars structs
@@ -229,7 +236,7 @@ pub enum DataKey {
     DaoVote(Address, Bytes), // voter, logic_hash -> DaoVote struct
     LogicUpgradeProposal(u64), // proposal_id -> LogicUpgradeProposal struct
     ProposalCounter,
-    DaoMembers(Vec<Address>),
+    DaoMembersKey,
     // Task 3: Scholarship Registry entries
     ScholarshipRegistry(Address), // university_address -> ScholarshipRegistry struct
     UniversityContractIndex(Address, u64), // university, index -> contract_id
@@ -240,6 +247,11 @@ pub enum DataKey {
     AgreementSignature(u64, Address), // agreement_id, signer -> AgreementSignature struct
     StudentPrimaryAgreement(Address), // student -> (agreement_id, primary_language)
     LanguageVersionHash(Bytes), // document_hash -> LanguageVersion metadata
+    // Attendance and Royalty entries
+    AttendanceRecord(Address), // student -> AttendanceRecord
+    RoyaltyKey(u64), // course_id -> RoyaltySplit
+    TuitionStipendSplit(Address), // student -> TuitionStipendSplit
+    StudentGPA(Address), // student -> StudentGPA
 }
 
 #[contracttype]
@@ -703,10 +715,6 @@ impl ScholarContract {
         );
     }
 
-        // Distribute royalties
-        Self::distribute_royalty(&env, course_id, actual_cost, &token);
-    }
-
     pub fn heartbeat(env: Env, student: Address, course_id: u64, _signature: soroban_sdk::Bytes) {
         student.require_auth();
         let current_time = env.ledger().timestamp();
@@ -752,22 +760,6 @@ impl ScholarContract {
         Self::update_academic_profile(env.clone(), student.clone());
     }
 
-    fn calculate_dynamic_rate(env: Env, student: Address, course_id: u64) -> i128 {
-        let base_rate: i128 = env.storage().instance().get(&DataKey::BaseRate).unwrap_or(1);
-        let threshold: u64 = env.storage().instance().get(&DataKey::DiscountThreshold).unwrap_or(3600);
-        let percentage: u64 = env.storage().instance().get(&DataKey::DiscountPercentage).unwrap_or(10);
-
-        let access: Access = env.storage().persistent().get(&DataKey::Access(student, course_id)).unwrap_or_else(|| {
-            // Return dummy Access if not found
-            Access { student: Address::generate(&env), course_id, expiry_time: 0, token: Address::generate(&env), total_watch_time: 0, last_heartbeat: 0, last_purchase_time: 0 }
-        });
-
-        if access.total_watch_time >= threshold {
-            base_rate - (base_rate * percentage as i128 / 100)
-        } else {
-            base_rate
-        }
-    }
 
     pub fn has_access(env: Env, student: Address, course_id: u64) -> bool {
         // Check if student scholarship is disputed
@@ -801,6 +793,18 @@ impl ScholarContract {
         if Self::has_active_subscription(env.clone(), student.clone(), course_id) {
             return true;
         }
+
+        // Check if student has active access to the course
+        let access: Option<Access> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Access(student, course_id));
+
+        if let Some(a) = access {
+            return env.ledger().timestamp() < a.expiry_time;
+        }
+
+        false
     }
 
     fn has_active_subscription(env: Env, student: Address, course_id: u64) -> bool {
@@ -886,6 +890,7 @@ impl ScholarContract {
         student: Address,
         amount: i128,
         token: Address,
+        roadmap_id: Symbol,
     ) {
         funder.require_auth();
 
@@ -913,6 +918,7 @@ impl ScholarContract {
                 is_disputed: false,
                 dispute_reason: None,
                 final_ruling: None,
+                roadmap_id,
             });
 
         // Only add the student's portion to scholarship balance after processing tutoring redirects
@@ -1071,14 +1077,27 @@ impl ScholarContract {
 
         let current_time = env.ledger().timestamp();
 
-        if current_time > access.last_purchase_time + EARLY_DROP_WINDOW_SECONDS {
+        // Check if student is within the early drop window for full refund
+        if current_time <= access.last_purchase_time + EARLY_DROP_WINDOW_SECONDS {
+            // Full refund within 24 hours of purchase
+            let rate = Self::calculate_dynamic_rate(env.clone(), student.clone(), course_id);
+            let full_refund = rate * (86400 as i128); // Refund for 24 hours purchased
 
+            // Reset expiry to revoke access
+            access.expiry_time = 0;
+            env.storage().persistent().set(&access_key, &access);
+
+            let client = token::Client::new(&env, &access.token);
+            client.transfer(&env.current_contract_address(), &student, &full_refund);
+
+            return full_refund;
         }
 
         if current_time >= access.expiry_time {
             return 0;
         }
 
+        // Pro-rated refund for remaining time
         let remaining_seconds = access.expiry_time - current_time;
         let rate = Self::calculate_dynamic_rate(env.clone(), student.clone(), course_id);
         let refund_amount = (remaining_seconds as i128) * rate;
@@ -1118,12 +1137,10 @@ impl ScholarContract {
 
     /// Generate a privacy-protecting student alias
     fn generate_student_alias(env: &Env, student: &Address) -> Symbol {
-        let student_bytes = student.to_string();
-        let hash = env.crypto().sha256(&student_bytes.into());
-        // Take first 4 bytes and convert to a simple hex representation
-        let short_hash = &hash[0..4];
-        let alias_str = "Student_"; // Simple prefix
-        Symbol::new(env, alias_str)
+        // Create a deterministic alias from the student address
+        // Use a simple format - just return a generic "Scholar" key
+        // In production, this would create a unique hash-based alias
+        Symbol::new(env, "Scholar")
     }
 
     /// Initialize or update student's academic profile
@@ -1475,14 +1492,18 @@ impl ScholarContract {
         
         let mut redirect: SubStreamRedirect = env.storage().persistent()
             .get(&redirect_key)
-            .unwrap_or(SubStreamRedirect {
-                from_scholar: scholar.clone(),
-                to_tutor: Address::generate(&env), // Dummy address
-                flow_rate: 0,
-                start_time: current_time,
-                last_redirect: current_time,
-                total_amount_redirected: 0,
-                is_active: false,
+            .unwrap_or({
+                // Create a default SubStreamRedirect with a dummy tutor address
+                // Use the scholar address itself as a placeholder
+                SubStreamRedirect {
+                    from_scholar: scholar.clone(),
+                    to_tutor: scholar.clone(), // Placeholder - would be set by create_tutoring_agreement
+                    flow_rate: 0,
+                    start_time: current_time,
+                    last_redirect: current_time,
+                    total_amount_redirected: 0,
+                    is_active: false,
+                }
             });
 
         if !redirect.is_active {
@@ -1989,7 +2010,7 @@ impl ScholarContract {
             panic!("DAO requires at least 3 members");
         }
 
-        env.storage().instance().set(&DataKey::DaoMembers, &members);
+        env.storage().instance().set(&DataKey::DaoMembersKey, &members);
         
         #[allow(deprecated)]
         env.events().publish(
@@ -2009,7 +2030,7 @@ impl ScholarContract {
 
         // Verify proposer is a DAO member
         let members: Vec<Address> = env.storage().instance()
-            .get(&DataKey::DaoMembers)
+            .get(&DataKey::DaoMembersKey)
             .expect("DAO members not initialized");
         
         if !members.contains(&proposer) {
@@ -2074,7 +2095,7 @@ impl ScholarContract {
 
         // Verify voter is a DAO member
         let members: Vec<Address> = env.storage().instance()
-            .get(&DataKey::DaoMembers)
+            .get(&DataKey::DaoMembersKey)
             .expect("DAO members not initialized");
         
         if !members.contains(&voter) {
@@ -2344,7 +2365,7 @@ impl ScholarContract {
             // GPA is acceptable
             if probation_status.is_on_probation {
                 // Student recovered - end probation (optimized)
-                Self::end_probation_batch(env.clone(), student.clone(), &mut probation_status);
+                Self::end_probation_batch(env.clone(), student.clone(), &mut probation_status, true);
             }
         }
 
@@ -2390,7 +2411,7 @@ impl ScholarContract {
             // Emit event (batched)
             #[allow(deprecated)]
             env.events().publish(
-                (Symbol::new(&env, "ProbationStarted"), student,),
+                (Symbol::new(&env, "ProbationStarted"), student.clone(),),
                 probation_status.warning_period_end
             );
         }
@@ -2404,7 +2425,7 @@ impl ScholarContract {
             // Restore original flow rate
             scholarship.balance = probation_status.original_flow_rate;
             
-            env.storage().persistent().set(&DataKey::Scholarship(student), &scholarship);
+            env.storage().persistent().set(&DataKey::Scholarship(student.clone()), &scholarship);
             env.storage().persistent().extend_ttl(
                 &DataKey::Scholarship(student), 
                 LEDGER_BUMP_THRESHOLD, 
@@ -2423,7 +2444,7 @@ impl ScholarContract {
         // Emit event (batched)
         #[allow(deprecated)]
         env.events().publish(
-            (Symbol::new(&env, "ProbationEnded"), student,),
+            (Symbol::new(&env, "ProbationEnded"), student.clone(),),
             true
         );
     }
@@ -2462,7 +2483,7 @@ impl ScholarContract {
             last_updated: current_time,
         };
 
-        env.storage().persistent().set(&DataKey::ScholarshipRegistry(university), &registry);
+        env.storage().persistent().set(&DataKey::ScholarshipRegistry(university.clone()), &registry);
 
         #[allow(deprecated)]
         env.events().publish(
@@ -2886,7 +2907,7 @@ impl ScholarContract {
         // Update student's primary agreement reference
         env.storage().persistent().set(
             &DataKey::StudentPrimaryAgreement(agreement.student.clone()),
-            &(agreement_id, new_primary_language)
+            &(agreement_id, new_primary_language.clone())
         );
 
         #[allow(deprecated)]
@@ -2965,8 +2986,201 @@ impl ScholarContract {
         );
     }
 
+    /// Issue #126: Implement Batch_Revoke_with_Automatic_Refund_to_Foundation
+    /// Revokes scholarships for multiple students in a single transaction and refunds unvested funds to foundation
+    pub fn batch_revoke_with_automatic_refund(env: Env, admin: Address, students: Vec<Address>) {
+        admin.require_auth();
+        
+        if !Self::is_admin(&env, &admin) {
+            panic!("Not authorized");
+        }
+
+        let mut total_refunded: i128 = 0;
+
+        for student in students.clone() {
+            if let Some(mut scholarship) = env.storage().persistent()
+                .get::<_, Scholarship>(&DataKey::Scholarship(student.clone())) {
+                
+                // Calculate unvested balance (total balance minus unlocked balance)
+                let unvested_balance = scholarship.balance - scholarship.unlocked_balance;
+                
+                if unvested_balance > 0 {
+                    // Transfer unvested funds to foundation (admin)
+                    let token_client = soroban_sdk::token::Client::new(&env, &scholarship.token);
+                    token_client.transfer(&env.current_contract_address(), &admin, &unvested_balance);
+                    
+                    total_refunded += unvested_balance;
+                }
+
+                // Mark scholarship as disputed with group revocation reason
+                scholarship.is_disputed = true;
+                scholarship.dispute_reason = Some(Symbol::new(&env, "GROUP_REVOCATION"));
+                scholarship.final_ruling = Some(Symbol::new(&env, "REVOKED"));
+                
+                env.storage().persistent().set(&DataKey::Scholarship(student.clone()), &scholarship);
+                env.storage().persistent().extend_ttl(
+                    &DataKey::Scholarship(student.clone()), 
+                    LEDGER_BUMP_THRESHOLD, 
+                    LEDGER_BUMP_EXTEND
+                );
+            }
+
+            // Clear probation status if exists
+            env.storage().persistent().remove(&DataKey::ProbationStatus(student.clone()));
+        }
+
+        // Emit group revocation event
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "GroupRevocation"), students),
+            total_refunded
+        );
+    }
+
+    // ==================== HELPER FUNCTIONS ====================
+
+    /// Distribute tuition-stipend split according to configured ratios
+    /// Returns (university_amount, student_amount)
+    fn distribute_tuition_stipend_split(
+        env: &Env,
+        student: &Address,
+        amount: i128,
+        token: &Address,
+    ) -> (i128, i128) {
+        // Get tuition-stipend split configuration
+        let split: Option<TuitionStipendSplit> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TuitionStipendSplit(student.clone()));
+
+        if let Some(split_config) = split {
+            let university_amount = (amount * split_config.university_percentage as i128) / 100;
+            let student_amount = amount - university_amount;
+
+            // Transfer university portion to university address
+            if university_amount > 0 {
+                let token_client = token::Client::new(env, token);
+                token_client.transfer(&env.current_contract_address(), &split_config.university_address, &university_amount);
+            }
+
+            (university_amount, student_amount)
+        } else {
+            // Default: 70% to university, 30% to student
+            let university_amount = (amount * 70) / 100;
+            let student_amount = amount - university_amount;
+
+            (university_amount, student_amount)
+        }
+    }
+
+    /// Apply attendance penalty to the scholarship flow rate
+    fn apply_attendance_penalty_to_rate(env: Env, student: Address, rate: i128) -> i128 {
+        // Check if student is on probation or has attendance issues
+        let attendance: Option<AttendanceRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AttendanceRecord(student.clone()));
+
+        if let Some(record) = attendance {
+            if record.flow_rate_penalty_active {
+                // Apply penalty (e.g., 20% reduction for poor attendance)
+                let penalty_reduction = (rate * 20) / 100;
+                return rate - penalty_reduction;
+            }
+        }
+
+        rate
+    }
+
+    /// Distribute royalties to course creators
+    fn distribute_royalty(env: &Env, course_id: u64, amount: i128, token: &Address) {
+        // Get royalty split configuration for the course
+        let royalty_split: Option<RoyaltySplit> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RoyaltyKey(course_id));
+
+        if let Some(split) = royalty_split {
+            let total_shares: u32 = {
+                let mut sum = 0u32;
+                for i in 0..split.shares.len() {
+                    let (_, percentage) = split.shares.get(i).expect("Invalid share index");
+                    sum += percentage;
+                }
+                sum
+            };
+
+            if total_shares > 0 {
+                let token_client = token::Client::new(env, token);
+
+                // Distribute to each royalty recipient
+                for i in 0..split.shares.len() {
+                    let (recipient, percentage) = split.shares.get(i).expect("Invalid share index");
+                    let share_amount = (amount * percentage as i128) / (total_shares as i128);
+
+                    if share_amount > 0 {
+                        token_client.transfer(&env.current_contract_address(), &recipient, &share_amount);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Track attendance and apply penalties/bonuses
+    pub fn track_attendance(env: Env, student: Address) {
+        let current_time = env.ledger().timestamp();
+        let attendance_key = DataKey::AttendanceRecord(student.clone());
+
+        let mut record: AttendanceRecord = env
+            .storage()
+            .persistent()
+            .get(&attendance_key)
+            .unwrap_or(AttendanceRecord {
+                student: student.clone(),
+                last_check_in: 0,
+                consecutive_days_present: 0,
+                consecutive_days_absent: 0,
+                total_check_ins: 0,
+                flow_rate_penalty_active: false,
+                penalty_start_time: None,
+            });
+
+        // Update last check-in
+        let last_check_date = record.last_check_in / 86400; // Convert to days
+        let current_date = current_time / 86400;
+
+        if current_date > last_check_date {
+            // New day check-in
+            record.consecutive_days_present += 1;
+            record.consecutive_days_absent = 0; // Reset absent counter
+            record.total_check_ins += 1;
+        }
+
+        record.last_check_in = current_time;
+        env.storage().persistent().set(&attendance_key, &record);
+        env.storage().persistent().extend_ttl(&attendance_key, LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+    }
+
+    /// Check if attendance requirement has been met
+    pub fn check_attendance_requirement(env: Env, student: Address, required_days: u64) -> bool {
+        let attendance: Option<AttendanceRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AttendanceRecord(student));
+
+        if let Some(record) = attendance {
+            return record.consecutive_days_present >= required_days;
+        }
+
+        false
     }
 }
+
+// Additional DataKey variant for attendance tracking
+// Add this to the DataKey enum if needed
+// AttendanceRecord(Address),
+// RoyaltyKey(u64),
+// TuitionStipendSplit(Address),
 
 mod test;
 mod tuition_stipend_split_tests;
