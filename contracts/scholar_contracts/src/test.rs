@@ -833,6 +833,47 @@ fn test_academic_oracle_hook() {
 }
 
 #[test]
+fn test_claim_scholarship_for_tuition_auto_exit() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let funder = Address::generate(&env);
+    let student = Address::generate(&env);
+    let scholarship_token_admin = Address::generate(&env);
+    let stablecoin_admin = Address::generate(&env);
+
+    let scholarship_token_address = env.register_stellar_asset_contract_v2(scholarship_token_admin.clone());
+    let stablecoin_address = env.register_stellar_asset_contract_v2(stablecoin_admin.clone());
+    let scholarship_token_client = token::StellarAssetClient::new(&env, &scholarship_token_address.address());
+    let stablecoin_client = token::StellarAssetClient::new(&env, &stablecoin_address.address());
+
+    scholarship_token_client.mint(&funder, &1000);
+    let dex_contract = env.register(MockDexContract, ());
+    stablecoin_client.mint(&dex_contract, &1000);
+
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+    client.init(&10, &3600, &10, &100, &60);
+    client.fund_scholarship(&funder, &student, &500, &scholarship_token_address.address());
+
+    let path = vec![&env, scholarship_token_address.address(), stablecoin_address.address()];
+
+    let received = client.claim_scholarship_for_tuition(
+        &student,
+        &200,
+        &stablecoin_address.address(),
+        &dex_contract,
+        &150,
+        &path,
+    );
+
+    assert_eq!(received, 200);
+    assert_eq!(stablecoin_client.balance(&student), 200);
+    let updated_scholarship: Scholarship = env.storage().persistent().get(&DataKey::Scholarship(student.clone())).unwrap();
+    assert_eq!(updated_scholarship.balance, 300);
+}
+
+#[test]
 fn test_course_registry_basic_functionality() {
     let env = Env::default();
     env.mock_all_auths();
