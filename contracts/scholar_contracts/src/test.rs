@@ -833,6 +833,47 @@ fn test_academic_oracle_hook() {
 }
 
 #[test]
+fn test_claim_scholarship_for_tuition_auto_exit() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let funder = Address::generate(&env);
+    let student = Address::generate(&env);
+    let scholarship_token_admin = Address::generate(&env);
+    let stablecoin_admin = Address::generate(&env);
+
+    let scholarship_token_address = env.register_stellar_asset_contract_v2(scholarship_token_admin.clone());
+    let stablecoin_address = env.register_stellar_asset_contract_v2(stablecoin_admin.clone());
+    let scholarship_token_client = token::StellarAssetClient::new(&env, &scholarship_token_address.address());
+    let stablecoin_client = token::StellarAssetClient::new(&env, &stablecoin_address.address());
+
+    scholarship_token_client.mint(&funder, &1000);
+    let dex_contract = env.register(MockDexContract, ());
+    stablecoin_client.mint(&dex_contract, &1000);
+
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+    client.init(&10, &3600, &10, &100, &60);
+    client.fund_scholarship(&funder, &student, &500, &scholarship_token_address.address());
+
+    let path = vec![&env, scholarship_token_address.address(), stablecoin_address.address()];
+
+    let received = client.claim_scholarship_for_tuition(
+        &student,
+        &200,
+        &stablecoin_address.address(),
+        &dex_contract,
+        &150,
+        &path,
+    );
+
+    assert_eq!(received, 200);
+    assert_eq!(stablecoin_client.balance(&student), 200);
+    let updated_scholarship: Scholarship = env.storage().persistent().get(&DataKey::Scholarship(student.clone())).unwrap();
+    assert_eq!(updated_scholarship.balance, 300);
+}
+
+#[test]
 fn test_course_registry_basic_functionality() {
     let env = Env::default();
     env.mock_all_auths();
@@ -2630,4 +2671,140 @@ fn test_community_veto_and_graduation_flow() {
 
     // This should panic, proving the lock was in place before the vote
     client.withdraw_scholarship(&student, &1);
+}
+
+// --- Issue #116: Sub-Scholarship Delegation for Departments ---
+
+#[test]
+fn test_department_vault_grant_and_delegate() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let donor = Address::generate(&env);
+    let manager = Address::generate(&env); // e.g. CS Dean
+    let student = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
+    // Mint 50,000 tokens to the donor
+    token_client.mint(&donor, &50_000);
+
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+    client.init(&10, &3600, &10, &100, &60);
+
+    // Main Donor grants manager rights over a 50,000 token pool
+    client.grant_manager_rights(&donor, &manager, &50_000, &token_address.address());
+
+    // Vault should exist with correct totals
+    let vault = client.get_department_vault(&manager).unwrap();
+    assert_eq!(vault.total_allocated, 50_000);
+    assert_eq!(vault.distributed, 0);
+    assert!(vault.is_active);
+
+    // Manager delegates 10,000 to a student
+    client.delegate_to_student(&manager, &student, &10_000);
+
+    let vault = client.get_department_vault(&manager).unwrap();
+    assert_eq!(vault.distributed, 10_000);
+
+    let delegation = client.get_department_delegation(&manager, &student).unwrap();
+    assert_eq!(delegation.amount, 10_000);
+    assert_eq!(delegation.claimed, 0);
+    assert!(delegation.is_active);
+}
+
+#[test]
+fn test_student_claims_delegation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let donor = Address::generate(&env);
+    let manager = Address::generate(&env);
+    let student = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
+    token_client.mint(&donor, &50_000);
+
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+    client.init(&10, &3600, &10, &100, &60);
+
+    client.grant_manager_rights(&donor, &manager, &50_000, &token_address.address());
+    client.delegate_to_student(&manager, &student, &10_000);
+
+    // Student claims their delegation
+    client.claim_department_delegation(&manager, &student);
+
+    let student_balance = token_client.balance(&student);
+    assert_eq!(student_balance, 10_000);
+
+    let delegation = client.get_department_delegation(&manager, &student).unwrap();
+    assert_eq!(delegation.claimed, 10_000);
+}
+
+#[test]
+fn test_manager_revokes_delegation_returns_to_vault() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let donor = Address::generate(&env);
+    let manager = Address::generate(&env);
+    let student = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
+    token_client.mint(&donor, &50_000);
+
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+    client.init(&10, &3600, &10, &100, &60);
+
+    client.grant_manager_rights(&donor, &manager, &50_000, &token_address.address());
+    client.delegate_to_student(&manager, &student, &10_000);
+
+    // Manager revokes before student claims
+    client.revoke_student_delegation(&manager, &student);
+
+    // Vault's distributed balance should be back to 0
+    let vault = client.get_department_vault(&manager).unwrap();
+    assert_eq!(vault.distributed, 0);
+
+    // Delegation should be inactive
+    let delegation = client.get_department_delegation(&manager, &student).unwrap();
+    assert!(!delegation.is_active);
+
+    // Student should have received nothing
+    assert_eq!(token_client.balance(&student), 0);
+}
+
+#[test]
+fn test_vault_insufficient_balance_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let donor = Address::generate(&env);
+    let manager = Address::generate(&env);
+    let student = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
+    token_client.mint(&donor, &50_000);
+
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+    client.init(&10, &3600, &10, &100, &60);
+
+    client.grant_manager_rights(&donor, &manager, &50_000, &token_address.address());
+
+    // Attempting to delegate more than the vault holds should panic
+    let result = std::panic::catch_unwind(|| {
+        client.delegate_to_student(&manager, &student, &60_000);
+    });
+    assert!(result.is_err(), "Expected panic on over-delegation");
 }
