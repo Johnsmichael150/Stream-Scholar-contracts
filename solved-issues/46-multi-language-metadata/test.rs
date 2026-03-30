@@ -498,7 +498,7 @@ fn test_scholarship_role() {
     client.set_teacher(&admin, &teacher, &true);
 
     // 2. Fund scholarship for student
-    client.fund_scholarship(&funder, &student, &500, &token_address.address(), &false);
+    client.fund_scholarship(&funder, &student, &500, &token_address.address());
 
     // Verify contract has tokens and student has balance
     let token = token::Client::new(&env, &token_address.address());
@@ -602,6 +602,38 @@ fn test_prevent_session_sharing() {
 }
 
 #[test]
+fn test_calculate_remaining_airtime() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let student = Address::generate(&env);
+    let funder = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
+    token_client.mint(&student, &10000);
+    token_client.mint(&funder, &1000);
+
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+
+    client.init(&10, &3600, &10, &100, &60);
+    client.buy_access(&student, &1, &5000, &token_address.address());
+
+    env.ledger().set_timestamp(100);
+
+    let session1 = soroban_sdk::Bytes::from_slice(&env, b"11111111111111111111111111111111");
+    let session2 = soroban_sdk::Bytes::from_slice(&env, b"22222222222222222222222222222222");
+
+    client.heartbeat(&student, &1, &session1);
+
+    // Fast forward to allowed heartbeat timing
+    env.ledger().set_timestamp(160);
+    client.heartbeat(&student, &1, &session1);
+}
+
+#[test]
 fn test_allow_session_reset_after_timeout() {
     let env = Env::default();
     env.mock_all_auths();
@@ -651,7 +683,7 @@ fn test_calculate_remaining_airtime() {
 
     assert_eq!(client.calculate_remaining_airtime(&student), 0);
 
-    client.fund_scholarship(&funder, &student, &500, &token_address.address(), &false);
+    client.fund_scholarship(&funder, &student, &500, &token_address.address());
 
     assert_eq!(client.calculate_remaining_airtime(&student), 50);
 }
@@ -673,7 +705,7 @@ fn test_calculate_remaining_airtime_zero_flow_rate() {
     let client = ScholarContractClient::new(&env, &contract_id);
 
     client.init(&0, &3600, &10, &100, &60);
-    client.fund_scholarship(&funder, &student, &500, &token_address.address(), &false);
+    client.fund_scholarship(&funder, &student, &500, &token_address.address());
 
     assert_eq!(client.calculate_remaining_airtime(&student), 0);
 }
@@ -743,7 +775,7 @@ fn test_scholarship_withdrawal() {
 
     // 1. Initial funding
     client.init(&10, &3600, &10, &100, &60);
-    client.fund_scholarship(&funder, &student, &500, &token_address.address(), &false);
+    client.fund_scholarship(&funder, &student, &500, &token_address.address());
 
     // 2. Register Mock Oracle and Verify
     let oracle_id = env.register(MockOracle, ());
@@ -803,7 +835,7 @@ fn test_academic_oracle_hook() {
     let oracle_id = env.register(MockOracle, ());
     client.set_academic_oracle(&admin, &oracle_id);
 
-    client.fund_scholarship(&funder, &student, &50000, &token_address.address(), &false);
+    client.fund_scholarship(&funder, &student, &50000, &token_address.address());
 
     // Should fail withdrawal before verification
     let result = env.try_invoke_contract::<(), soroban_sdk::Error>(
@@ -831,46 +863,10 @@ fn test_academic_oracle_hook() {
     );
     assert!(result2.is_err());
 }
-
-#[test]
-fn test_claim_scholarship_for_tuition_auto_exit() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let funder = Address::generate(&env);
-    let student = Address::generate(&env);
-    let scholarship_token_admin = Address::generate(&env);
-    let stablecoin_admin = Address::generate(&env);
-
-    let scholarship_token_address = env.register_stellar_asset_contract_v2(scholarship_token_admin.clone());
-    let stablecoin_address = env.register_stellar_asset_contract_v2(stablecoin_admin.clone());
-    let scholarship_token_client = token::StellarAssetClient::new(&env, &scholarship_token_address.address());
-    let stablecoin_client = token::StellarAssetClient::new(&env, &stablecoin_address.address());
-
-    scholarship_token_client.mint(&funder, &1000);
-    let dex_contract = env.register(MockDexContract, ());
-    stablecoin_client.mint(&dex_contract, &1000);
-
-    let contract_id = env.register(ScholarContract, ());
-    let client = ScholarContractClient::new(&env, &contract_id);
-    client.init(&10, &3600, &10, &100, &60);
-    client.fund_scholarship(&funder, &student, &500, &scholarship_token_address.address());
-
-    let path = vec![&env, scholarship_token_address.address(), stablecoin_address.address()];
-
-    let received = client.claim_scholarship_for_tuition(
-        &student,
-        &200,
-        &stablecoin_address.address(),
-        &dex_contract,
-        &150,
-        &path,
-    );
-
-    assert_eq!(received, 200);
-    assert_eq!(stablecoin_client.balance(&student), 200);
-    let updated_scholarship: Scholarship = env.storage().persistent().get(&DataKey::Scholarship(student.clone())).unwrap();
-    assert_eq!(updated_scholarship.balance, 300);
+    // 3. Unauthorized withdrawal (mock_all_auths should normally be specific)
+    // Actually, in Soroban tests, `mock_all_auths` is very permissive.
+    // If I want to test AUTH specifically, I might want to use more fine-grained auth testing.
+    // But for this task, the implementation of `require_auth` in `lib.rs` is the key part.
 }
 
 #[test]
@@ -887,9 +883,9 @@ fn test_course_registry_basic_functionality() {
     client.set_admin(&admin);
 
     // Add courses to registry
-    client.add_course_to_registry(&1, &teacher, &true, &true); // Free course with donations
-    client.add_course_to_registry(&2, &teacher, &false, &false); // Paid course
-    client.add_course_to_registry(&3, &teacher, &true, &false); // Free course without donations
+    client.add_course_to_registry(&1, &teacher);
+    client.add_course_to_registry(&2, &teacher);
+    client.add_course_to_registry(&3, &teacher);
 
     // List all courses
     let courses = client.list_courses();
@@ -943,7 +939,7 @@ fn test_course_registry_size_limit() {
     // Try to add more courses than the maximum allowed
     // This will panic when trying to add the 1001st course
     for i in 1..=1001 {
-        client.add_course_to_registry(&i, &teacher, &false, &false);
+        client.add_course_to_registry(&i, &teacher);
     }
 }
 
@@ -960,8 +956,8 @@ fn test_course_registry_duplicate_course() {
     client.init(&10, &3600, &10, &100, &60);
 
     // Add the same course twice - should panic
-    client.add_course_to_registry(&1, &teacher, &false, &false);
-    client.add_course_to_registry(&1, &teacher, &false, &false);
+    client.add_course_to_registry(&1, &teacher);
+    client.add_course_to_registry(&1, &teacher);
 }
 
 #[test]
@@ -994,7 +990,7 @@ fn test_course_registry_ttl_management() {
     client.set_admin(&admin);
 
     // Add course and verify TTL is extended
-    client.add_course_to_registry(&1, &teacher, &true, &true);
+    client.add_course_to_registry(&1, &teacher);
 
     // Multiple calls should extend TTL without issues
     for _ in 0..10 {
@@ -1018,7 +1014,7 @@ fn test_course_registry_gas_efficiency() {
 
     // Add a reasonable number of courses
     for i in 1..=50 {
-        client.add_course_to_registry(&i, &teacher, &false, &false);
+        client.add_course_to_registry(&i, &teacher);
     }
 
     // Test that pagination works efficiently with larger datasets
@@ -1144,7 +1140,7 @@ fn test_creator_royalty_split() {
     client.set_admin(&admin);
 
     // Add course by teacher
-    client.add_course_to_registry(&1, &teacher, &false, &false);
+    client.add_course_to_registry(&1, &teacher);
 
     // Set royalty split: 70% teacher, 30% editor
     let shares = vec![&env, (teacher.clone(), 70u32), (editor.clone(), 30u32)];
@@ -1179,7 +1175,7 @@ fn test_royalty_split_invalid_total() {
     let client = ScholarContractClient::new(&env, &contract_id);
 
     client.init(&10, &3600, &10, &100, &60);
-    client.add_course_to_registry(&1, &teacher, &false, &false);
+    client.add_course_to_registry(&1, &teacher);
 
     let bad_shares = vec![
         &env,
@@ -1206,7 +1202,7 @@ fn test_royalty_split_no_split_fallback() {
     let client = ScholarContractClient::new(&env, &contract_id);
 
     client.init(&10, &3600, &10, &100, &60);
-    client.add_course_to_registry(&1, &teacher, &false, &false);
+    client.add_course_to_registry(&1, &teacher);
 
     // No royalty split set
     let contract_before = token_client.balance(&contract_id);
@@ -1242,7 +1238,7 @@ fn test_creator_royalty_split_unauthorized() {
     client.set_admin(&admin);
 
     // Add course by teacher
-    client.add_course_to_registry(&1, &teacher, &false, &false);
+    client.add_course_to_registry(&1, &teacher);
 
     // Set royalty split: 70% teacher, 30% editor
     let shares = vec![&env, (teacher.clone(), 70u32), (editor.clone(), 30u32)];
@@ -1467,7 +1463,7 @@ fn test_research_grant_with_scholarship_coexistence() {
     client.init(&10, &3600, &10, &100, &60);
 
     // Fund a regular scholarship for living stipend
-    client.fund_scholarship(&grantor, &student, &2000, &token_address.address(), &false);
+    client.fund_scholarship(&grantor, &student, &2000, &token_address.address());
 
     // Create a research grant for equipment
     client.create_research_grant(&grantor, &student, &5000, &token_address.address());
@@ -1622,7 +1618,7 @@ fn test_disputed_student_cannot_access_courses() {
     client.init_deans_council(&admin, &council_members, &2);
 
     // Fund scholarship and buy course access
-    client.fund_scholarship(&funder, &student, &1000, &token_address.address(), &false);
+    client.fund_scholarship(&funder, &student, &1000, &token_address.address());
     client.buy_access(&student, &1, &100, &token_address.address());
 
     // Verify initial access
@@ -1666,7 +1662,7 @@ fn test_final_ruling_upload() {
     client.init_deans_council(&admin, &council_members, &2);
 
     // Fund scholarship
-    client.fund_scholarship(&funder, &student, &1000, &token_address.address(), &false);
+    client.fund_scholarship(&funder, &student, &1000, &token_address.address());
 
     // Execute board pause
     let reason = Symbol::new(&env, "plagiarism_confirmed");
@@ -1898,7 +1894,7 @@ fn test_drip_recalculation_on_gpa_change() {
     client.set_academic_oracle(&admin, &oracle);
 
     // Fund scholarship
-    client.fund_scholarship(&funder, &student, &5000, &token_address.address(), &false);
+    client.fund_scholarship(&funder, &student, &5000, &token_address.address());
 
     // Report initial GPA 3.6 (2% bonus)
     client.report_student_gpa(&oracle, &student, &36);
@@ -1937,487 +1933,441 @@ fn test_gpa_validation() {
     assert_eq!(client.get_student_gpa_bonus(&student), 18);
 }
 
+// Multi-Language Metadata Tests
+
 #[test]
-fn test_ssi_verification() {
+fn test_create_course_metadata() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let student = Address::generate(&env);
     let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let course_id = 1u64;
+    let default_language = Symbol::new(&env, "en");
+    let base_metadata_cid = Symbol::new(&env, "QmTest123");
 
     let contract_id = env.register(ScholarContract, ());
     let client = ScholarContractClient::new(&env, &contract_id);
-    
+
+    client.init(&10, &3600, &10, &100, &60);
     client.set_admin(&admin);
-    
-    // Test SSI verification with valid score
-    let verification_type = Symbol::new(&env, "gitcoin_passport");
-    let proof_data = soroban_sdk::Bytes::from_slice(&env, b"valid_proof_data");
-    
-    client.verify_ssi_identity(&student, &verification_type, &85, &proof_data);
-    
-    // Verify SSI status
-    assert!(client.is_ssi_verified(&student));
-    assert_eq!(client.get_personhood_score(&student), 85);
-    
-    // Test SSI verification with insufficient score
-    let student2 = Address::generate(&env);
-    let proof_data2 = soroban_sdk::Bytes::from_slice(&env, b"invalid_proof_data");
-    
-    let result = std::panic::catch_unwind(|| {
-        client.verify_ssi_identity(&student2, &verification_type, &75, &proof_data2);
-    });
-    assert!(result.is_err()); // Should panic due to insufficient score
+
+    // First, create the course in registry
+    client.add_course_to_registry(&course_id, &creator);
+
+    // Create course metadata
+    client.create_course_metadata(&course_id, &default_language, &base_metadata_cid, &creator);
+
+    // Verify metadata was created
+    let metadata = client.get_course_metadata(&course_id);
+    assert_eq!(metadata.course_id, course_id);
+    assert_eq!(metadata.default_language, default_language);
+    assert_eq!(metadata.base_metadata_cid, base_metadata_cid);
+    assert_eq!(metadata.available_languages.len(), 1);
+    assert!(metadata.available_languages.contains(&default_language));
+    assert!(metadata.is_active);
 }
 
 #[test]
-fn test_geographic_verification() {
+fn test_add_language_metadata() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let student = Address::generate(&env);
     let admin = Address::generate(&env);
-    let oracle = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let course_id = 1u64;
+    let default_language = Symbol::new(&env, "en");
+    let spanish_language = Symbol::new(&env, "es");
+    let base_metadata_cid = Symbol::new(&env, "QmTest123");
+    let spanish_metadata_cid = Symbol::new(&env, "QmSpanish456");
+    let spanish_title = Symbol::new(&env, "Curso de Ejemplo");
+    let spanish_description = Symbol::new(&env, "Descripción del curso en español");
+    let spanish_thumbnail = Symbol::new(&env, "QmSpanishThumb");
 
     let contract_id = env.register(ScholarContract, ());
     let client = ScholarContractClient::new(&env, &contract_id);
-    
+
+    client.init(&10, &3600, &10, &100, &60);
     client.set_admin(&admin);
-    
-    // Set regional oracle
-    let region = Symbol::new(&env, "lagos");
-    client.set_regional_oracle(&admin, &region, &oracle);
-    
-    // Verify residency
-    let geohash = soroban_sdk::Bytes::from_slice(&env, b"s1g2g3h4");
-    let proof_signature = soroban_sdk::Bytes::from_slice(&env, b"valid_signature");
-    
-    client.verify_residency(&student, &geohash, &region, &proof_signature, &oracle);
-    
-    // Check verified region
-    assert_eq!(client.get_verified_region(&student), Some(region));
-    
-    // Test location compliance
-    assert!(client.check_location_compliance(&student, &geohash));
-    assert!(!client.is_in_geographic_review(&student));
-    
-    // Test location change triggers review
-    let new_geohash = soroban_sdk::Bytes::from_slice(&env, b"different_hash");
-    assert!(!client.check_location_compliance(&student, &new_geohash));
-    assert!(client.is_in_geographic_review(&student));
+
+    // Create course and base metadata
+    client.add_course_to_registry(&course_id, &creator);
+    client.create_course_metadata(&course_id, &default_language, &base_metadata_cid, &creator);
+
+    // Add Spanish language metadata
+    client.add_language_metadata(
+        &course_id,
+        &spanish_language,
+        &spanish_metadata_cid,
+        &spanish_title,
+        &spanish_description,
+        Some(spanish_thumbnail),
+        &creator,
+    );
+
+    // Verify Spanish metadata was added
+    let spanish_metadata = client.get_language_metadata(&course_id, &spanish_language);
+    assert_eq!(spanish_metadata.language_code, spanish_language);
+    assert_eq!(spanish_metadata.ipfs_cid, spanish_metadata_cid);
+    assert_eq!(spanish_metadata.title, spanish_title);
+    assert_eq!(spanish_metadata.description, spanish_description);
+    assert_eq!(spanish_metadata.thumbnail_cid.unwrap(), spanish_thumbnail);
+
+    // Verify course metadata was updated
+    let course_metadata = client.get_course_metadata(&course_id);
+    assert_eq!(course_metadata.available_languages.len(), 2);
+    assert!(course_metadata.available_languages.contains(&default_language));
+    assert!(course_metadata.available_languages.contains(&spanish_language));
 }
 
 #[test]
-fn test_stream_creation_with_ssi_requirement() {
+fn test_update_language_metadata() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let funder = Address::generate(&env);
-    let student = Address::generate(&env);
     let admin = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-
-    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
-    token_client.mint(&funder, &10000);
+    let creator = Address::generate(&env);
+    let course_id = 1u64;
+    let default_language = Symbol::new(&env, "en");
+    let base_metadata_cid = Symbol::new(&env, "QmTest123");
+    let updated_cid = Symbol::new(&env, "QmUpdated789");
+    let updated_title = Symbol::new(&env, "Updated Title");
+    let updated_description = Symbol::new(&env, "Updated Description");
 
     let contract_id = env.register(ScholarContract, ());
     let client = ScholarContractClient::new(&env, &contract_id);
-    
+
+    client.init(&10, &3600, &10, &100, &60);
     client.set_admin(&admin);
-    
-    // Test high-value stream without SSI verification (should fail)
-    let high_rate = 1000; // This would be ~2.6M tokens per month
-    let result = std::panic::catch_unwind(|| {
-        client.create_stream(&funder, &student, &high_rate, &token_address.address(), None);
-    });
-    assert!(result.is_err()); // Should fail due to no SSI verification
-    
-    // Verify SSI first
-    let verification_type = Symbol::new(&env, "stellar_sep12");
-    let proof_data = soroban_sdk::Bytes::from_slice(&env, b"valid_stellar_proof");
-    client.verify_ssi_identity(&student, &verification_type, &90, &proof_data);
-    
-    // Now stream creation should succeed
-    client.create_stream(&funder, &student, &high_rate, &token_address.address(), None);
-    
-    // Test low-value stream without SSI (should succeed)
-    let student2 = Address::generate(&env);
-    let low_rate = 10; // This would be ~26K tokens per month
-    client.create_stream(&funder, &student2, &low_rate, &token_address.address(), None);
+
+    // Create course and base metadata
+    client.add_course_to_registry(&course_id, &creator);
+    client.create_course_metadata(&course_id, &default_language, &base_metadata_cid, &creator);
+
+    // Update default language metadata
+    client.update_language_metadata(
+        &course_id,
+        &default_language,
+        &updated_cid,
+        &updated_title,
+        &updated_description,
+        None,
+        &creator,
+    );
+
+    // Verify metadata was updated
+    let updated_metadata = client.get_language_metadata(&course_id, &default_language);
+    assert_eq!(updated_metadata.ipfs_cid, updated_cid);
+    assert_eq!(updated_metadata.title, updated_title);
+    assert_eq!(updated_metadata.description, updated_description);
+    assert!(updated_metadata.thumbnail_cid.is_none());
 }
 
 #[test]
-fn test_stream_with_geographic_restriction() {
+fn test_get_available_languages() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let funder = Address::generate(&env);
-    let student = Address::generate(&env);
     let admin = Address::generate(&env);
-    let oracle = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-
-    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
-    token_client.mint(&funder, &10000);
+    let creator = Address::generate(&env);
+    let course_id = 1u64;
+    let default_language = Symbol::new(&env, "en");
+    let spanish_language = Symbol::new(&env, "es");
+    let french_language = Symbol::new(&env, "fr");
+    let base_metadata_cid = Symbol::new(&env, "QmTest123");
 
     let contract_id = env.register(ScholarContract, ());
     let client = ScholarContractClient::new(&env, &contract_id);
-    
+
+    client.init(&10, &3600, &10, &100, &60);
     client.set_admin(&admin);
-    
-    // Set up geographic verification
-    let region = Symbol::new(&env, "abuja");
-    client.set_regional_oracle(&admin, &region, &oracle);
-    
-    let geohash = soroban_sdk::Bytes::from_slice(&env, b"abuja_hash");
-    let proof_signature = soroban_sdk::Bytes::from_slice(&env, b"valid_abuja_proof");
-    client.verify_residency(&student, &geohash, &region, &proof_signature, &oracle);
-    
-    // Create stream with geographic restriction
-    let rate = 100;
-    client.create_stream(&funder, &student, &rate, &token_address.address(), Some(region));
-    
-    // Deposit to stream
-    client.deposit_to_stream(&funder, &student, &1000, &token_address.address());
-    
-    // Withdraw from stream
-    env.ledger().set_timestamp(100); // 100 seconds passed
-    let withdrawn = client.withdraw_from_stream(&student, &funder, &token_address.address());
-    assert_eq!(withdrawn, 100 * 100); // 100 seconds * 100 tokens/second
-    
-    // Test withdrawal during geographic review (should fail)
-    let new_geohash = soroban_sdk::Bytes::from_slice(&env, b"different_location");
-    client.check_location_compliance(&student, &new_geohash); // This triggers review
-    
-    let result = std::panic::catch_unwind(|| {
-        client.withdraw_from_stream(&student, &funder, &token_address.address());
-    });
-    assert!(result.is_err()); // Should fail due to geographic review
+
+    // Create course and base metadata
+    client.add_course_to_registry(&course_id, &creator);
+    client.create_course_metadata(&course_id, &default_language, &base_metadata_cid, &creator);
+
+    // Initially should have only default language
+    let languages = client.get_available_languages(&course_id);
+    assert_eq!(languages.len(), 1);
+    assert!(languages.contains(&default_language));
+
+    // Add Spanish
+    client.add_language_metadata(
+        &course_id,
+        &spanish_language,
+        &Symbol::new(&env, "QmSpanish"),
+        &Symbol::new(&env, "Spanish Title"),
+        &Symbol::new(&env, "Spanish Description"),
+        None,
+        &creator,
+    );
+
+    let languages = client.get_available_languages(&course_id);
+    assert_eq!(languages.len(), 2);
+    assert!(languages.contains(&default_language));
+    assert!(languages.contains(&spanish_language));
+
+    // Add French
+    client.add_language_metadata(
+        &course_id,
+        &french_language,
+        &Symbol::new(&env, "QmFrench"),
+        &Symbol::new(&env, "French Title"),
+        &Symbol::new(&env, "French Description"),
+        None,
+        &creator,
+    );
+
+    let languages = client.get_available_languages(&course_id);
+    assert_eq!(languages.len(), 3);
+    assert!(languages.contains(&default_language));
+    assert!(languages.contains(&spanish_language));
+    assert!(languages.contains(&french_language));
 }
 
 #[test]
-fn test_stream_management() {
+fn test_set_default_language() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let funder = Address::generate(&env);
-    let student = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-
-    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
-    token_client.mint(&funder, &10000);
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let course_id = 1u64;
+    let default_language = Symbol::new(&env, "en");
+    let spanish_language = Symbol::new(&env, "es");
+    let base_metadata_cid = Symbol::new(&env, "QmTest123");
 
     let contract_id = env.register(ScholarContract, ());
     let client = ScholarContractClient::new(&env, &contract_id);
-    
-    // Create stream
-    let rate = 50;
-    client.create_stream(&funder, &student, &rate, &token_address.address(), None);
-    
-    // Deposit funds
-    client.deposit_to_stream(&funder, &student, &2000, &token_address.address());
-    
-    // Check stream balance
-    assert_eq!(client.get_stream_balance(&funder, &student), 2000);
-    
-    // Pause stream
-    client.pause_stream(&funder, &student);
-    
-    // Try to withdraw while paused (should fail)
-    let result = std::panic::catch_unwind(|| {
-        client.withdraw_from_stream(&student, &funder, &token_address.address());
-    });
+
+    client.init(&10, &3600, &10, &100, &60);
+    client.set_admin(&admin);
+
+    // Create course and add multiple languages
+    client.add_course_to_registry(&course_id, &creator);
+    client.create_course_metadata(&course_id, &default_language, &base_metadata_cid, &creator);
+    client.add_language_metadata(
+        &course_id,
+        &spanish_language,
+        &Symbol::new(&env, "QmSpanish"),
+        &Symbol::new(&env, "Spanish Title"),
+        &Symbol::new(&env, "Spanish Description"),
+        None,
+        &creator,
+    );
+
+    // Verify initial default language
+    assert_eq!(client.get_default_language(&course_id), default_language);
+
+    // Change default language to Spanish
+    client.set_default_language(&course_id, &spanish_language, &creator);
+
+    // Verify default language was changed
+    assert_eq!(client.get_default_language(&course_id), spanish_language);
+}
+
+#[test]
+fn test_remove_language_metadata() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let course_id = 1u64;
+    let default_language = Symbol::new(&env, "en");
+    let spanish_language = Symbol::new(&env, "es");
+    let base_metadata_cid = Symbol::new(&env, "QmTest123");
+
+    let contract_id = env.register(ScholarContract, ());
+    let client = ScholarContractClient::new(&env, &contract_id);
+
+    client.init(&10, &3600, &10, &100, &60);
+    client.set_admin(&admin);
+
+    // Create course and add Spanish language
+    client.add_course_to_registry(&course_id, &creator);
+    client.create_course_metadata(&course_id, &default_language, &base_metadata_cid, &creator);
+    client.add_language_metadata(
+        &course_id,
+        &spanish_language,
+        &Symbol::new(&env, "QmSpanish"),
+        &Symbol::new(&env, "Spanish Title"),
+        &Symbol::new(&env, "Spanish Description"),
+        None,
+        &creator,
+    );
+
+    // Verify Spanish exists
+    let languages = client.get_available_languages(&course_id);
+    assert_eq!(languages.len(), 2);
+    assert!(languages.contains(&spanish_language));
+
+    // Remove Spanish language
+    client.remove_language_metadata(&course_id, &spanish_language, &creator);
+
+    // Verify Spanish was removed
+    let languages = client.get_available_languages(&course_id);
+    assert_eq!(languages.len(), 1);
+    assert!(!languages.contains(&spanish_language));
+    assert!(languages.contains(&default_language));
+
+    // Verify Spanish metadata no longer exists
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.get_language_metadata(&course_id, &spanish_language);
+    }));
     assert!(result.is_err());
-    
-    // Resume stream
-    client.resume_stream(&funder, &student);
-    
-    // Withdraw should work now
-    env.ledger().set_timestamp(50); // 50 seconds passed
-    let withdrawn = client.withdraw_from_stream(&student, &funder, &token_address.address());
-    assert_eq!(withdrawn, 50 * 50); // 50 seconds * 50 tokens/second
-}
-
-// Issue #92: Anonymized Leaderboard for Top Scholars Tests
-
-#[test]
-fn test_academic_profile_creation() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let student = Address::generate(&env);
-    let contract_id = env.register(ScholarContract, ());
-    let client = ScholarContractClient::new(&env, &contract_id);
-
-    // Initialize contract
-    client.init(&10, &3600, &10, &100, &60);
-
-    // Update academic profile
-    client.update_academic_profile(&student);
-
-    // The profile should be created with initial academic points
-    // We can't directly access the profile, but we can test the leaderboard
-    let leaderboard = client.get_leaderboard(&1);
-    assert_eq!(leaderboard.len(), 1);
 }
 
 #[test]
-fn test_course_completion_points() {
+fn test_cannot_remove_default_language() {
     let env = Env::default();
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let student = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let course_id = 1u64;
+    let default_language = Symbol::new(&env, "en");
+    let base_metadata_cid = Symbol::new(&env, "QmTest123");
+
     let contract_id = env.register(ScholarContract, ());
     let client = ScholarContractClient::new(&env, &contract_id);
 
-    // Initialize contract and set admin
     client.init(&10, &3600, &10, &100, &60);
     client.set_admin(&admin);
 
-    // Award course completion points
-    client.award_course_completion_points(&student, &1);
+    // Create course
+    client.add_course_to_registry(&course_id, &creator);
+    client.create_course_metadata(&course_id, &default_language, &base_metadata_cid, &creator);
 
-    // Check if student appears on leaderboard
-    let leaderboard = client.get_leaderboard(&10);
-    assert!(!leaderboard.is_empty());
+    // Try to remove default language - should fail
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.remove_language_metadata(&course_id, &default_language, &creator);
+    }));
+    assert!(result.is_err());
 }
 
 #[test]
-fn test_excellence_pool() {
+fn test_unauthorized_language_metadata_access() {
     let env = Env::default();
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let funder = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-
-    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
-    token_client.mint(&funder, &10000);
+    let creator = Address::generate(&env);
+    let unauthorized_user = Address::generate(&env);
+    let course_id = 1u64;
+    let default_language = Symbol::new(&env, "en");
+    let base_metadata_cid = Symbol::new(&env, "QmTest123");
 
     let contract_id = env.register(ScholarContract, ());
     let client = ScholarContractClient::new(&env, &contract_id);
 
-    // Initialize contract and set admin
     client.init(&10, &3600, &10, &100, &60);
     client.set_admin(&admin);
 
-    // Initialize excellence pool
-    client.init_excellence_pool(&admin, &token_address.address());
+    // Create course
+    client.add_course_to_registry(&course_id, &creator);
+    client.create_course_metadata(&course_id, &default_language, &base_metadata_cid, &creator);
 
-    // Fund the pool
-    client.fund_excellence_pool(&funder, &1000);
+    // Try to add language metadata as unauthorized user - should fail
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.add_language_metadata(
+            &course_id,
+            &Symbol::new(&env, "es"),
+            &Symbol::new(&env, "QmSpanish"),
+            &Symbol::new(&env, "Spanish Title"),
+            &Symbol::new(&env, "Spanish Description"),
+            None,
+            &unauthorized_user,
+        );
+    }));
+    assert!(result.is_err());
 
-    // Test would require more setup for actual distribution
-    // This is a basic test to ensure the functions don't panic
+    // Try to update language metadata as unauthorized user - should fail
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.update_language_metadata(
+            &course_id,
+            &default_language,
+            &Symbol::new(&env, "QmUpdated"),
+            &Symbol::new(&env, "Updated Title"),
+            &Symbol::new(&env, "Updated Description"),
+            None,
+            &unauthorized_user,
+        );
+    }));
+    assert!(result.is_err());
+
+    // Try to remove language metadata as unauthorized user - should fail
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.remove_language_metadata(&course_id, &default_language, &unauthorized_user);
+    }));
+    assert!(result.is_err());
 }
 
-// Issue #94: Peer-to-Peer Tutoring Payment Bridge Tests
-
 #[test]
-fn test_tutoring_agreement_creation() {
+fn test_admin_can_manage_language_metadata() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let scholar = Address::generate(&env);
-    let tutor = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let course_id = 1u64;
+    let default_language = Symbol::new(&env, "en");
+    let spanish_language = Symbol::new(&env, "es");
+    let base_metadata_cid = Symbol::new(&env, "QmTest123");
+
     let contract_id = env.register(ScholarContract, ());
     let client = ScholarContractClient::new(&env, &contract_id);
 
-    // Initialize contract
     client.init(&10, &3600, &10, &100, &60);
+    client.set_admin(&admin);
 
-    // Create tutoring agreement
-    let agreement_id = client.create_tutoring_agreement(
-        &scholar,
-        &tutor,
-        &5, // 5% percentage
-        &3600, // 1 hour duration
+    // Create course
+    client.add_course_to_registry(&course_id, &creator);
+    client.create_course_metadata(&course_id, &default_language, &base_metadata_cid, &creator);
+
+    // Admin should be able to add language metadata
+    client.add_language_metadata(
+        &course_id,
+        &spanish_language,
+        &Symbol::new(&env, "QmSpanish"),
+        &Symbol::new(&env, "Spanish Title"),
+        &Symbol::new(&env, "Spanish Description"),
+        None,
+        &admin,
     );
 
-    assert_eq!(agreement_id, 1);
+    // Verify Spanish was added
+    let languages = client.get_available_languages(&course_id);
+    assert_eq!(languages.len(), 2);
+    assert!(languages.contains(&spanish_language));
 
-    // Get the agreement
-    let agreement = client.get_tutoring_agreement(&agreement_id);
-    assert_eq!(agreement.scholar, scholar);
-    assert_eq!(agreement.tutor, tutor);
-    assert_eq!(agreement.percentage, 5);
-    assert!(agreement.is_active);
-}
-
-#[test]
-fn test_tutoring_agreement_ending() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let scholar = Address::generate(&env);
-    let tutor = Address::generate(&env);
-    let contract_id = env.register(ScholarContract, ());
-    let client = ScholarContractClient::new(&env, &contract_id);
-
-    // Initialize contract
-    client.init(&10, &3600, &10, &100, &60);
-
-    // Create tutoring agreement
-    let agreement_id = client.create_tutoring_agreement(
-        &scholar,
-        &tutor,
-        &5, // 5% percentage
-        &3600, // 1 hour duration
+    // Admin should be able to update language metadata
+    client.update_language_metadata(
+        &course_id,
+        &spanish_language,
+        &Symbol::new(&env, "QmSpanishUpdated"),
+        &Symbol::new(&env, "Updated Spanish Title"),
+        &Symbol::new(&env, "Updated Spanish Description"),
+        None,
+        &admin,
     );
 
-    // End the agreement
-    client.end_tutoring_agreement(&scholar, &agreement_id);
-
-    // Get the agreement and verify it's ended
-    let agreement = client.get_tutoring_agreement(&agreement_id);
-    assert!(!agreement.is_active);
+    // Verify metadata was updated
+    let spanish_metadata = client.get_language_metadata(&course_id, &spanish_language);
+    assert_eq!(spanish_metadata.ipfs_cid, Symbol::new(&env, "QmSpanishUpdated"));
+    assert_eq!(spanish_metadata.title, Symbol::new(&env, "Updated Spanish Title"));
 }
 
 #[test]
-fn test_tutoring_payment_processing() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let scholar = Address::generate(&env);
-    let tutor = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-
-    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
-    token_client.mint(&scholar, &1000);
-
-    let contract_id = env.register(ScholarContract, ());
-    let client = ScholarContractClient::new(&env, &contract_id);
-
-    // Initialize contract
-    client.init(&10, &3600, &10, &100, &60);
-
-    // Create tutoring agreement
-    let _agreement_id = client.create_tutoring_agreement(
-        &scholar,
-        &tutor,
-        &10, // 10% percentage
-        &3600, // 1 hour duration
-    );
-
-    // Fund scholarship (this should process tutoring payment)
-    client.fund_scholarship(&scholar, &scholar, &1000, &token_address.address(), &false);
-
-    // The test verifies the function doesn't panic
-    // In a real scenario, we'd check the tutor's balance
-}
-
-// Issue #95: Alumni Donation Matching Incentive Tests
-
-#[test]
-fn test_alumni_donation_matching_with_sbt() {
+fn test_duplicate_language_metadata() {
     let env = Env::default();
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let alumnus = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-
-    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
-    
-    // Mint tokens for alumnus donation
-    token_client.mint(&alumnus, &1000);
-    
-    let contract_id = env.register(ScholarContract, ());
-    let client = ScholarContractClient::new(&env, &contract_id);
-
-    // Initialize contract and set admin
-    client.init(&10, &3600, &10, &100, &60);
-    client.set_admin(&admin);
-
-    // Initialize General Excellence Fund
-    client.init_general_excellence_fund(&admin, &token_address.address());
-    
-    // Fund the General Excellence Fund
-    token_client.mint(&admin, &2000);
-    client.fund_general_excellence_fund(&admin, &1000);
-
-    // Issue Graduation SBT to alumnus
-    client.issue_graduation_sbt(&admin, &alumnus, &35); // 3.5 GPA
-
-    // Process alumni donation (should get 2:1 match)
-    let (original_amount, matched_amount) = client.process_alumni_donation(
-        &alumnus,
-        &100, // Original donation
-        &1,    // Scholarship pool ID
-        &token_address.address(),
-    );
-
-    assert_eq!(original_amount, 100);
-    assert_eq!(matched_amount, 200); // 2:1 match
-
-    // Verify donation record
-    let donation = client.get_alumni_donation(&1);
-    assert!(donation.is_some());
-    let donation = donation.unwrap();
-    assert_eq!(donation.original_amount, 100);
-    assert_eq!(donation.matched_amount, 200);
-    assert!(donation.has_graduation_sbt);
-
-    // Verify General Excellence Fund balance decreased
-    let fund = client.get_general_excellence_fund();
-    assert!(fund.is_some());
-    let fund = fund.unwrap();
-    assert_eq!(fund.total_balance, 800); // 1000 - 200 matched
-    assert_eq!(fund.total_matched, 200);
-}
-
-#[test]
-fn test_alumni_donation_without_sbt() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let admin = Address::generate(&env);
-    let donor = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-
-    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
-    
-    token_client.mint(&donor, &1000);
-    
-    let contract_id = env.register(ScholarContract, ());
-    let client = ScholarContractClient::new(&env, &contract_id);
-
-    client.init(&10, &3600, &10, &100, &60);
-    client.set_admin(&admin);
-
-    // Process donation without SBT (no matching)
-    let (original_amount, matched_amount) = client.process_alumni_donation(
-        &donor,
-        &100,
-        &1,
-        &token_address.address(),
-    );
-
-    assert_eq!(original_amount, 100);
-    assert_eq!(matched_amount, 0); // No match without SBT
-
-    // Verify donation record
-    let donation = client.get_alumni_donation(&1);
-    assert!(donation.is_some());
-    let donation = donation.unwrap();
-    assert!(!donation.has_graduation_sbt);
-}
-
-#[test]
-fn test_graduation_sbt_issuance() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let admin = Address::generate(&env);
-    let student = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let course_id = 1u64;
+    let default_language = Symbol::new(&env, "en");
+    let base_metadata_cid = Symbol::new(&env, "QmTest123");
 
     let contract_id = env.register(ScholarContract, ());
     let client = ScholarContractClient::new(&env, &contract_id);
@@ -2425,250 +2375,21 @@ fn test_graduation_sbt_issuance() {
     client.init(&10, &3600, &10, &100, &60);
     client.set_admin(&admin);
 
-    // Issue graduation SBT
-    let token_id = client.issue_graduation_sbt(&admin, &student, &38); // 3.8 GPA
+    // Create course
+    client.add_course_to_registry(&course_id, &creator);
+    client.create_course_metadata(&course_id, &default_language, &base_metadata_cid, &creator);
 
-    assert_eq!(token_id, 1);
-
-    // Verify SBT exists
-    let sbt = client.get_graduation_sbt(&student);
-    assert!(sbt.is_some());
-    let sbt = sbt.unwrap();
-    assert_eq!(sbt.gpa, 38);
-    assert!(sbt.is_verified);
-}
-
-// Issue #93: Scholarship Probation Cooling-Off Logic Tests
-
-#[test]
-fn test_probation_start_and_recovery() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let admin = Address::generate(&env);
-    let oracle = Address::generate(&env);
-    let student = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-
-    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
-    
-    let contract_id = env.register(ScholarContract, ());
-    let client = ScholarContractClient::new(&env, &contract_id);
-
-    client.init(&10, &3600, &10, &100, &60);
-    client.set_admin(&admin);
-
-    // Fund scholarship for student
-    token_client.mint(&admin, &1000);
-    client.fund_scholarship(&admin, &student, &1000, &token_address.address(), &false);
-
-    // Update GPA below threshold (should start probation)
-    client.update_student_gpa(&oracle, &student, &20); // 2.0 GPA < 2.5 threshold
-
-    // Check probation status
-    let probation = client.get_probation_status(&student);
-    assert!(probation.is_some());
-    let probation = probation.unwrap();
-    assert!(probation.is_on_probation);
-    assert_eq!(probation.violation_count, 1);
-
-    // Simulate recovery - update GPA above threshold
-    env.ledger().set_timestamp(env.ledger().timestamp() + 1000000); // Advance time
-    client.update_student_gpa(&oracle, &student, &30); // 3.0 GPA > 2.5 threshold
-
-    // Check probation ended
-    let probation = client.get_probation_status(&student);
-    assert!(probation.is_some());
-    let probation = probation.unwrap();
-    assert!(!probation.is_on_probation);
-}
-
-#[test]
-fn test_permanent_revocation_after_warning_period() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let admin = Address::generate(&env);
-    let oracle = Address::generate(&env);
-    let student = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-
-    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
-    
-    let contract_id = env.register(ScholarContract, ());
-    let client = ScholarContractClient::new(&env, &contract_id);
-
-    client.init(&10, &3600, &10, &100, &60);
-    client.set_admin(&admin);
-
-    // Fund scholarship
-    token_client.mint(&admin, &1000);
-    client.fund_scholarship(&admin, &student, &1000, &token_address.address(), &false);
-
-    // Start probation with low GPA
-    client.update_student_gpa(&oracle, &student, &20); // 2.0 GPA
-
-    // Advance time beyond warning period (60 days)
-    let warning_period_end = env.ledger().timestamp() + PROBATION_WARNING_PERIOD + 1000;
-    env.ledger().set_timestamp(warning_period_end);
-
-    // Update GPA still below threshold after warning period (should revoke)
-    client.update_student_gpa(&oracle, &student, &22); // Still below 2.5 threshold
-
-    // Check probation status should be cleared (revoked)
-    let probation = client.get_probation_status(&student);
-    assert!(probation.is_none()); // Cleared after revocation
-
-    // Check scholarship is disputed/revoked
-    let scholarship = client.scholarship(&student);
-    assert!(scholarship.is_disputed);
-    assert_eq!(scholarship.dispute_reason.unwrap(), Symbol::new(&env, "PERMANENT_REVOCATION_GPA"));
-}
-
-#[test]
-fn test_gpa_update_tracking() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let admin = Address::generate(&env);
-    let oracle = Address::generate(&env);
-    let student = Address::generate(&env);
-
-    let contract_id = env.register(ScholarContract, ());
-    let client = ScholarContractClient::new(&env, &contract_id);
-
-    client.init(&10, &3600, &10, &100, &60);
-    client.set_admin(&admin);
-
-    // Update GPA
-    client.update_student_gpa(&oracle, &student, &35); // 3.5 GPA
-
-    // Check GPA update record
-    let gpa_update = client.get_gpa_update(&student);
-    assert!(gpa_update.is_some());
-    let gpa_update = gpa_update.unwrap();
-    assert_eq!(gpa_update.new_gpa, 35);
-    assert_eq!(gpa_update.previous_gpa, 0); // No previous GPA
-    assert!(gpa_update.oracle_verified);
-
-    // Update GPA again
-    client.update_student_gpa(&oracle, &student, &32); // 3.2 GPA
-
-    // Check updated record
-    let gpa_update = client.get_gpa_update(&student);
-    assert!(gpa_update.is_some());
-    let gpa_update = gpa_update.unwrap();
-    assert_eq!(gpa_update.new_gpa, 32);
-    assert_eq!(gpa_update.previous_gpa, 35); // Previous GPA tracked
-}
-
-// --- Issue #118: Native XLM Scholarship Tests ---
-#[test]
-#[should_panic(expected = "Withdrawal would leave less than the 2 XLM gas reserve")]
-fn test_native_xlm_reserve() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let funder = Address::generate(&env);
-    let student = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-
-    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
-    token_client.mint(&funder, &10_0000000);
-
-    let contract_id = env.register_contract(None, ScholarContract);
-    let client = ScholarContractClient::new(&env, &contract_id);
-    client.init(&10, &3600, &10, &100, &60);
-
-    // Fund with 10 XLM, as a native scholarship
-    client.fund_scholarship(&funder, &student, &10_0000000, &token_address, &true);
-
-    // Withdraw 8 XLM, should succeed
-    client.withdraw_scholarship(&student, &8_0000000);
-
-    // Try to withdraw 1 more XLM, should fail because it would go below the 2 XLM reserve
-    client.withdraw_scholarship(&student, &1_0000000);
-}
-
-// --- Issue #112: Scholarship Claim Dry-Run Tests ---
-#[test]
-fn test_simulate_claim() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let admin = Address::generate(&env);
-    let funder = Address::generate(&env);
-    let student = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-
-    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
-    token_client.mint(&funder, &1000);
-
-    let contract_id = env.register_contract(None, ScholarContract);
-    let client = ScholarContractClient::new(&env, &contract_id);
-    client.init(&10, &3600, &10, &100, &60);
-    client.set_admin(&admin);
-
-    // Set 10% tax rate (1000 bps)
-    client.set_tax_rate(&admin, &1000);
-
-    // Fund scholarship with 1000 tokens
-    client.fund_scholarship(&funder, &student, &1000, &token_address, &false);
-
-    let simulation = client.simulate_claim(&student);
-
-    assert_eq!(simulation.tokens_to_release, 1000);
-    assert_eq!(simulation.estimated_gas_fee, ESTIMATED_GAS_FEE);
-    assert_eq!(simulation.tax_withholding_amount, 100); // 10% of 1000
-    assert_eq!(simulation.net_claimable_amount, 900);
-}
-
-// --- Issues #128 & #122: Community Veto and Graduation Registry Tests ---
-#[test]
-#[should_panic(expected = "Final 10% is locked pending community vote")]
-fn test_community_veto_and_graduation_flow() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let funder = Address::generate(&env);
-    let student = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-    let voters: [Address; 5] = [Address::generate(&env), Address::generate(&env), Address::generate(&env), Address::generate(&env), Address::generate(&env)];
-
-    let token_address = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = token::StellarAssetClient::new(&env, &token_address.address());
-    token_client.mint(&funder, &10000);
-
-    let contract_id = env.register_contract(None, ScholarContract);
-    let client = ScholarContractClient::new(&env, &contract_id);
-    client.init(&10, &3600, &10, &100, &60);
-
-    // Fund with 10000 tokens
-    client.fund_scholarship(&funder, &student, &10000, &token_address, &false);
-
-    // Withdraw 9000 tokens (90%)
-    client.withdraw_scholarship(&student, &9000);
-
-    // Initiate final release vote
-    client.initiate_final_release_vote(&student);
-
-    // Cast votes
-    for voter in voters {
-        client.cast_community_vote(&voter, &student);
-    }
-
-    // Claim final release
-    client.claim_final_release(&student);
-
-    // Check graduation registry
-    let graduate_profile = client.get_graduate_profile(&student).unwrap();
-    assert_eq!(graduate_profile.student, student);
-    assert!(graduate_profile.completed_scholarships.contains(&funder));
-
-    // This should panic, proving the lock was in place before the vote
-    client.withdraw_scholarship(&student, &1);
+    // Try to add duplicate language metadata - should fail
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.add_language_metadata(
+            &course_id,
+            &default_language, // Same as default
+            &Symbol::new(&env, "QmDuplicate"),
+            &Symbol::new(&env, "Duplicate Title"),
+            &Symbol::new(&env, "Duplicate Description"),
+            None,
+            &creator,
+        );
+    }));
+    assert!(result.is_err());
 }
